@@ -16,7 +16,7 @@ The only geometric predicate is `orient3d`.
 
 ## Status
 - [x] Phase A: parallel star-shaped growth (`ffhull/grow.py`)
-- [ ] Phase B: Flip-Flop convexification (`ffhull/flip.py`)
+- [x] Phase B: Flip-Flop convexification (2->2 + 3->1, V & D criteria)
 - [ ] Exact predicate + Simulation of Simplicity
 - [ ] Degenerate (coincident / collinear / coplanar) handling
 

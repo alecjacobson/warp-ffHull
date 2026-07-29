@@ -195,14 +195,17 @@ def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False):
         wp.launch(flip.reset_flip, dim=mesh.cap,
                   inputs=[mesh.tri_claim, mesh.prop_slot, mesh.prop_type], device=dev)
         mesh.changed.zero_()
+        wp.launch(flip.label_kernel, dim=count,
+                  inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
+                          mesh.tri_active, count, mesh.vertex_label, mesh.changed], device=dev)
         wp.launch(flip.propose_claim, dim=count,
                   inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
-                          mesh.tri_active, count, mesh.tri_claim, mesh.prop_slot, mesh.prop_type],
-                  device=dev)
+                          mesh.tri_active, count, mesh.vertex_label,
+                          mesh.tri_claim, mesh.prop_slot, mesh.prop_type], device=dev)
         wp.launch(flip.apply_flips, dim=count,
-                  inputs=[mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot, count,
-                          mesh.tri_claim, mesh.prop_slot, mesh.prop_type, mesh.changed],
-                  device=dev)
+                  inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
+                          mesh.tri_active, count, mesh.tri_claim, mesh.prop_slot,
+                          mesh.prop_type, mesh.changed], device=dev)
         ch = int(mesh.changed.numpy()[0])
         if verbose and (it % 20 == 0 or ch == 0):
             print(f"  flip it={it} changed={ch}")

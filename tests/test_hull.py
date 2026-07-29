@@ -47,6 +47,43 @@ def test_sphere():
         print(f"sphere n={n}: {m} faces == scipy")
 
 
+def test_gaussian_ball():
+    for seed in range(6):
+        rng = np.random.default_rng(seed)
+        pts = rng.standard_normal((1000, 3))
+        m = check_against_scipy(pts)
+        print(f"gaussian n=1000 seed={seed}: {m} faces == scipy")
+
+
+def test_uniform_cube():
+    for seed in range(4):
+        rng = np.random.default_rng(100 + seed)
+        pts = rng.uniform(-1, 1, size=(1500, 3))
+        m = check_against_scipy(pts)
+        print(f"uniform-cube n=1500 seed={seed}: {m} faces == scipy")
+
+
+def test_clustered():
+    # several gaussian blobs: many interior (non-extreme) points to remove
+    rng = np.random.default_rng(3)
+    blobs = [rng.standard_normal((400, 3)) * 0.3 + c
+             for c in rng.standard_normal((5, 3)) * 3]
+    pts = np.concatenate(blobs)
+    m = check_against_scipy(pts)
+    print(f"clustered n={len(pts)}: {m} faces == scipy")
+
+
+def test_large():
+    rng = np.random.default_rng(11)
+    pts = rng.standard_normal((50000, 3))
+    m = check_against_scipy(pts)
+    print(f"gaussian n=50000: {m} faces == scipy")
+
+
 if __name__ == "__main__":
     test_sphere()
-    print("hull (sphere) OK")
+    test_gaussian_ball()
+    test_uniform_cube()
+    test_clustered()
+    test_large()
+    print("hull OK")
