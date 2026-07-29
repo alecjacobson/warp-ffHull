@@ -148,39 +148,35 @@ def fix_adjacency(
     old_count: wp.int32,
     new_count: wp.int32,
 ):
-    ct = wp.tid()
-    if ct >= new_count:
+    # Pure gather: every triangle repairs ONLY its own adjacency, so there are
+    # no cross-triangle writes and no races.  If a neighbour split this round,
+    # redirect to the neighbour's child that retained the shared edge (its
+    # external edge is always local slot 0).
+    t = wp.tid()
+    if t >= new_count:
         return
-    is_child = False
-    if ct >= old_count:
-        is_child = True  # appended child
-    elif face_pivot[ct] != INT_MAX:
-        is_child = True  # split parent slot, now child0
-    if not is_child:
-        return
+    # A "child" created this round (appended, or a split parent's reused slot)
+    # has final internal sibling links in slots 1,2; only its external slot 0
+    # may need redirecting.  Non-split old faces may redirect any slot.
+    is_child = t >= old_count
+    if t < old_count and face_pivot[t] != INT_MAX:
+        is_child = True
 
-    oldN = tri_adj[ct][0]
-    oldj = tri_adj_slot[ct][0]
-    if oldN < 0:
-        return
-    if face_pivot[oldN] != INT_MAX:
-        # neighbour also split: point to its child retaining the shared edge
-        fc = face_children[oldN]
-        nc = fc[(oldj + 1) % 3]
-        adj = tri_adj[ct]
-        adj[0] = nc
-        tri_adj[ct] = adj
-        slot = tri_adj_slot[ct]
-        slot[0] = 0
-        tri_adj_slot[ct] = slot
-    else:
-        # neighbour unchanged: fix its back-pointer to us
-        nadj = tri_adj[oldN]
-        nadj[oldj] = ct
-        tri_adj[oldN] = nadj
-        nslot = tri_adj_slot[oldN]
-        nslot[oldj] = 0
-        tri_adj_slot[oldN] = nslot
+    adj = tri_adj[t]
+    aslot = tri_adj_slot[t]
+    for i in range(3):
+        if is_child and i != 0:
+            continue
+        n = adj[i]
+        if n < 0:
+            continue
+        if n < old_count and face_pivot[n] != INT_MAX:
+            sl = aslot[i]                       # reciprocal slot of the shared edge in n
+            fc = face_children[n]
+            adj[i] = fc[(sl + 1) % 3]           # child_of_edge(n, sl)
+            aslot[i] = 0
+    tri_adj[t] = adj
+    tri_adj_slot[t] = aslot
 
 
 @wp.kernel

@@ -5,6 +5,7 @@ import warp as wp
 
 from .mesh import Mesh, INT_MAX
 from . import grow
+from . import flip
 
 
 # ----------------------------------------------------------------------------
@@ -184,3 +185,40 @@ def build_star(points_np: np.ndarray, device="cuda:0", verbose=False):
     s = init_tetra(mesh, points_np, tetra_idx)
     grow_star(mesh, s, tetra_idx, verbose=verbose)
     return mesh, s, tetra_idx
+
+
+def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False):
+    dev = mesh.device
+    count = mesh.get_tri_count()
+    max_iter = 50 * mesh.n + 100
+    for it in range(max_iter):
+        wp.launch(flip.reset_flip, dim=mesh.cap,
+                  inputs=[mesh.tri_claim, mesh.prop_slot, mesh.prop_type], device=dev)
+        mesh.changed.zero_()
+        wp.launch(flip.propose_claim, dim=count,
+                  inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
+                          mesh.tri_active, count, mesh.tri_claim, mesh.prop_slot, mesh.prop_type],
+                  device=dev)
+        wp.launch(flip.apply_flips, dim=count,
+                  inputs=[mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot, count,
+                          mesh.tri_claim, mesh.prop_slot, mesh.prop_type, mesh.changed],
+                  device=dev)
+        ch = int(mesh.changed.numpy()[0])
+        if verbose and (it % 20 == 0 or ch == 0):
+            print(f"  flip it={it} changed={ch}")
+        if ch == 0:
+            break
+    return it
+
+
+def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False):
+    """Compute the 3D convex hull; returns an (m,3) int array of face vertex
+    indices into ``points_np`` (outward-oriented triangles)."""
+    mesh = Mesh(points_np, device)
+    tetra_idx, ok = choose_tetra(points_np)
+    if not ok:
+        raise NotImplementedError("degenerate (lower-dimensional) input")
+    s = init_tetra(mesh, points_np, tetra_idx)
+    grow_star(mesh, s, tetra_idx, verbose=verbose)
+    flip_convexify(mesh, s, verbose=verbose)
+    return live_faces(mesh)

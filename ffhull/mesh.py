@@ -49,9 +49,14 @@ class Mesh:
         # Counters / flags (single element device arrays)
         self.tri_count = wp.zeros(1, dtype=wp.int32, device=device)
         self.scratch_i = wp.zeros(1, dtype=wp.int32, device=device)
+        self.changed = wp.zeros(1, dtype=wp.int32, device=device)
 
-        # Flip scratch (triangle-indexed) allocated lazily by the flip phase
-        self.tri_claim = None
+        # Flip scratch (triangle-indexed)
+        self.tri_claim = wp.full(cap, INT_MAX, dtype=wp.int32, device=device)
+        self.prop_slot = wp.full(cap, -1, dtype=wp.int32, device=device)
+        self.prop_type = wp.zeros(cap, dtype=wp.int32, device=device)  # 0 none,2 22,3 31
+        # Vertex labels: 0 unknown/extreme, 1 non-extreme
+        self.vertex_label = wp.zeros(self.n, dtype=wp.int32, device=device)
 
     def set_tri_count(self, k: int):
         self.tri_count.assign(np.array([k], dtype=np.int32))
