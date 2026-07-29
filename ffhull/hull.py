@@ -214,14 +214,34 @@ def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False):
     return it
 
 
-def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False):
-    """Compute the 3D convex hull; returns an (m,3) int array of face vertex
-    indices into ``points_np`` (outward-oriented triangles)."""
+def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
+                return_vertices=False):
+    """Compute the 3D convex hull.
+
+    Returns an (m,3) int array of face vertex indices into ``points_np``
+    (outward-oriented triangles).  Lower-dimensional inputs (coincident,
+    collinear, coplanar) are detected on the host and dispatched to the
+    appropriate degenerate handler.  With ``return_vertices=True`` also returns
+    the array of extreme-vertex indices.
+    """
+    from . import degenerate
+    points_np = np.ascontiguousarray(points_np, dtype=np.float64)
+    dim, info = degenerate.analyze_dimension(points_np)
+    if dim < 3:
+        faces, verts = degenerate.hull_lowdim(points_np, dim, info)
+        return (faces, verts) if return_vertices else faces
+
     mesh = Mesh(points_np, device)
     tetra_idx, ok = choose_tetra(points_np)
     if not ok:
-        raise NotImplementedError("degenerate (lower-dimensional) input")
+        # numerically borderline: fall back to the coplanar handler
+        faces, verts = degenerate.hull_lowdim(points_np, 2,
+                                              degenerate.analyze_dimension(points_np, 1e-9)[1])
+        return (faces, verts) if return_vertices else faces
     s = init_tetra(mesh, points_np, tetra_idx)
     grow_star(mesh, s, tetra_idx, verbose=verbose)
     flip_convexify(mesh, s, verbose=verbose)
-    return live_faces(mesh)
+    faces = live_faces(mesh)
+    if return_vertices:
+        return faces, np.unique(faces)
+    return faces
