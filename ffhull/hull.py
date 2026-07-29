@@ -46,9 +46,11 @@ def choose_tetra(pts: np.ndarray):
     i2 = int(np.argmax(d2))
     if d2[i2] <= 1e-12 * np.sqrt(best[0]):
         return None, False  # collinear
-    # p3: farthest from plane p0-p1-p2.
+    # p3: farthest from plane p0-p1-p2.  orient3d(a,b,c,p) = (p-a).((b-a)x(c-a));
+    # vectorised distance-to-plane over all points.
     a, b, c = pts[i0], pts[i1], pts[i2]
-    vol = np.array([abs(_orient3d_np(a, b, c, p)) for p in pts])
+    nrm = np.cross(b - a, c - a)
+    vol = np.abs((pts - a) @ nrm)
     i3 = int(np.argmax(vol))
     if vol[i3] <= 1e-9 * (best[0] ** 1.5):
         return None, False  # coplanar
