@@ -183,8 +183,10 @@ def grow_star(mesh: Mesh, s: wp.vec3d, tetra_idx: np.ndarray, verbose=False,
 def live_faces(mesh: Mesh):
     """Return an (m,3) int array of vertex indices of live triangles."""
     k = mesh.get_tri_count()
-    tv = mesh.tri_v.numpy()[:k]
-    act = mesh.tri_active.numpy()[:k]
+    # slice on-device before copying, so we read back only k triangles, not the
+    # full 2n-capacity arrays (that readback dominated small-hull cases).
+    tv = mesh.tri_v[:k].numpy()
+    act = mesh.tri_active[:k].numpy()
     return tv[act == 1]
 
 
@@ -280,6 +282,33 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
     points_np = np.ascontiguousarray(points_np, dtype=np.float64)
     n = len(points_np)
 
+    # Conservative interior-point cull FIRST, on a lightweight points-only array,
+    # so we never allocate the big 2n workspace for a cloud we're about to shrink.
+    # Discard deep-interior points, run the exact hull on the survivors (a
+    # 2*survivors workspace), and map indices back.  Never drops a true hull
+    # vertex (survivors include every point on/outside the inner hull H0).
+    if filter and n >= FILTER_THRESHOLD:
+        from . import filter as filt
+        pchk = wp.array(points_np, dtype=wp.vec3d, device=device)
+        dim0, _, _ = seedmod.build_seed(pchk, n, device)
+        if dim0 < 3:
+            del pchk
+            d, info = degenerate.analyze_dimension(points_np)
+            faces, verts = degenerate.hull_lowdim(points_np, min(dim0, d), info)
+            return (faces, verts) if return_vertices else faces
+        keep = filt.cull_indices(
+            pchk, points_np, n, device,
+            hull_fn=lambda c: convex_hull(c, device=device, use_graph=use_graph,
+                                          robust=robust, filter=False))
+        del pchk
+        if keep is not None and len(keep) < 0.6 * n:
+            if verbose:
+                print(f"  cull: {n} -> {len(keep)} survivors ({100*len(keep)/n:.1f}%)")
+            f_local = convex_hull(points_np[keep], device=device, verbose=verbose,
+                                  use_graph=use_graph, robust=robust, filter=False)
+            faces = keep[f_local]
+            return (faces, np.unique(faces)) if return_vertices else faces
+
     mesh = _acquire_mesh(points_np, device) if reuse else Mesh(points_np, device)
     # Affine dimension is judged on the true input (a joggle would hide it).
     dim0, ti0, sp0 = seedmod.build_seed(mesh.points, n, device)
@@ -288,24 +317,6 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
         d, info = degenerate.analyze_dimension(points_np)
         faces, verts = degenerate.hull_lowdim(points_np, min(dim0, d), info)
         return (faces, verts) if return_vertices else faces
-
-    # Conservative interior-point cull: discard deep-interior points, then run
-    # the exact hull on the survivors and map indices back.  Never drops a true
-    # hull vertex (survivors include every point on/outside the inner hull H0).
-    if filter and n >= FILTER_THRESHOLD:
-        from . import filter as filt
-        keep = filt.cull_indices(
-            mesh.points, points_np, n, device,
-            hull_fn=lambda c: convex_hull(c, device=device, use_graph=use_graph,
-                                          robust=robust, filter=False))
-        if keep is not None and len(keep) < 0.6 * n:
-            _release_mesh(mesh)
-            if verbose:
-                print(f"  cull: {n} -> {len(keep)} survivors ({100*len(keep)/n:.1f}%)")
-            f_local = convex_hull(points_np[keep], device=device, verbose=verbose,
-                                  use_graph=use_graph, robust=robust, filter=False)
-            faces = keep[f_local]
-            return (faces, np.unique(faces)) if return_vertices else faces
 
     scale = float(np.abs(points_np).max() + 1.0)
     convex_tol = 1e-6 * scale ** 3
