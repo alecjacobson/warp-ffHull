@@ -70,3 +70,14 @@ class Mesh:
 
     def get_tri_count(self) -> int:
         return int(self.tri_count.numpy()[0])
+
+    def rebind(self, points_np: np.ndarray):
+        """Reuse this mesh for a new point set of the SAME size: re-upload the
+        points and reset the state that isn't reinitialised by the kernels
+        (counters + vertex labels).  Avoids re-allocating the 2n arrays."""
+        assert len(points_np) == self.n
+        self.points.assign(np.ascontiguousarray(points_np, dtype=np.float64))
+        self.vertex_label.zero_()
+        for a in (self.tri_count, self.old_count, self.scratch_i,
+                  self.changed, self.cond, self.iter_count, self.convex_flag):
+            a.zero_()

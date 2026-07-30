@@ -233,9 +233,37 @@ def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False, use_graph=True):
 
 FILTER_THRESHOLD = 50_000   # only cull for point clouds large enough to benefit
 
+# Reusable workspace pool, keyed by (device, n): repeated hulls of the same size
+# (and the joggle retries within one call) reuse the 2n-capacity arrays instead
+# of re-allocating them.  Bounded so it can't grow without limit.
+_MESH_POOL = {}
+_POOL_MAX_PER_KEY = 2
+
+
+def _acquire_mesh(points_np, device):
+    key = (device, len(points_np))
+    pool = _MESH_POOL.get(key)
+    if pool:
+        m = pool.pop()
+        m.rebind(points_np)
+        return m
+    return Mesh(points_np, device)
+
+
+def _release_mesh(m):
+    pool = _MESH_POOL.setdefault((m.device, m.n), [])
+    if len(pool) < _POOL_MAX_PER_KEY:
+        pool.append(m)
+
+
+def clear_pool():
+    """Drop all cached workspaces (frees their GPU memory)."""
+    _MESH_POOL.clear()
+
 
 def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
-                return_vertices=False, use_graph=True, robust=True, filter=False):
+                return_vertices=False, use_graph=True, robust=True, filter=False,
+                reuse=True):
     """Compute the 3D convex hull.
 
     Returns an (m,3) int array of face vertex indices into ``points_np``
@@ -252,12 +280,11 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
     points_np = np.ascontiguousarray(points_np, dtype=np.float64)
     n = len(points_np)
 
+    mesh = _acquire_mesh(points_np, device) if reuse else Mesh(points_np, device)
     # Affine dimension is judged on the true input (a joggle would hide it).
-    # Upload only the points for this check, not a full (2n-capacity) mesh.
-    _pchk = wp.array(points_np, dtype=wp.vec3d, device=device)
-    dim0, _, _ = seedmod.build_seed(_pchk, n, device)
+    dim0, ti0, sp0 = seedmod.build_seed(mesh.points, n, device)
     if dim0 < 3:
-        del _pchk
+        _release_mesh(mesh)
         d, info = degenerate.analyze_dimension(points_np)
         faces, verts = degenerate.hull_lowdim(points_np, min(dim0, d), info)
         return (faces, verts) if return_vertices else faces
@@ -268,36 +295,32 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
     if filter and n >= FILTER_THRESHOLD:
         from . import filter as filt
         keep = filt.cull_indices(
-            _pchk, points_np, n, device,
+            mesh.points, points_np, n, device,
             hull_fn=lambda c: convex_hull(c, device=device, use_graph=use_graph,
                                           robust=robust, filter=False))
-        del _pchk
         if keep is not None and len(keep) < 0.6 * n:
+            _release_mesh(mesh)
             if verbose:
                 print(f"  cull: {n} -> {len(keep)} survivors ({100*len(keep)/n:.1f}%)")
             f_local = convex_hull(points_np[keep], device=device, verbose=verbose,
                                   use_graph=use_graph, robust=robust, filter=False)
             faces = keep[f_local]
             return (faces, np.unique(faces)) if return_vertices else faces
-    else:
-        del _pchk
 
     scale = float(np.abs(points_np).max() + 1.0)
     convex_tol = 1e-6 * scale ** 3
-    mesh = None
     for attempt in range(5):
         if attempt == 0:
-            work = points_np
+            dim, tetra_idx, seed_pts = dim0, ti0, sp0
         else:
             # deterministic joggle to escape exact/near degeneracies (coplanar
             # facets etc.); magnitude grows each retry, hull indices unchanged.
             mag = 1e-8 * scale * (10.0 ** attempt)
             jog = np.random.default_rng(attempt).standard_normal(points_np.shape)
-            work = points_np + mag * jog
-        mesh = Mesh(work, device)
-        dim, tetra_idx, seed_pts = seedmod.build_seed(mesh.points, mesh.n, device)
-        if dim < 3:
-            continue  # joggle collapsed dimension (shouldn't happen); retry
+            mesh.rebind(points_np + mag * jog)
+            dim, tetra_idx, seed_pts = seedmod.build_seed(mesh.points, mesh.n, device)
+            if dim < 3:
+                continue  # joggle collapsed dimension (shouldn't happen); retry
         s = init_tetra(mesh, seed_pts, tetra_idx)
         grow_star(mesh, s, tetra_idx, verbose=verbose, use_graph=use_graph)
         flip_convexify(mesh, s, verbose=verbose, use_graph=use_graph)
@@ -321,7 +344,8 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
         if verbose:
             print(f"  invalid hull (attempt {attempt}); joggling and retrying")
 
-    faces = live_faces(mesh)
+    faces = live_faces(mesh)   # copies out of the mesh, so it can be released
+    _release_mesh(mesh)
     if return_vertices:
         return faces, np.unique(faces)
     return faces
