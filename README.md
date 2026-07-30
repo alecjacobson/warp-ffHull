@@ -77,7 +77,7 @@ Two fully data-parallel phases:
 - [ ] Simulation of Simplicity wired through the topology kernels (predicate is
   ready; needs consistent use in growth's furthest-point step)
 
-**Correctness:** 27-test suite passes; `stress.py` reports 16/16 valid on an
+**Correctness:** 29-test suite passes; `stress.py` reports 16/16 valid on an
 adversarial battery (general-position exact vs `scipy.spatial.ConvexHull`,
 degenerate inputs verified as valid enclosing hulls).
 
@@ -85,10 +85,25 @@ degenerate inputs verified as valid enclosing hulls).
 
 | input | n | ffHull | qhull | speedup |
 |-------|---|--------|-------|---------|
-| sphere (all extreme) | 1M | 0.79 s | 6.1 s | **7.7×** |
+| sphere (all extreme) | 1M | 0.80 s | 6.0 s | **7.5×** |
 | sphere | 5M | 5.1 s | 36 s | **7.1×** |
-| gaussian (tiny hull) | 1M | 43 ms | 146 ms | 3.4× |
+| gaussian (tiny hull) | 1M | 37 ms | 148 ms | 4.0× |
 | gaussian | 5M | 0.39 s | 0.85 s | 2.2× |
+
+**Real-world scans** — [`alecjacobson/threedscans`](https://huggingface.co/datasets/alecjacobson/threedscans)
+(Oliver Laric's high-res museum scans; raw STL vertices, 1.8–6.4 M points each):
+ffHull is **3.4–5.7× faster than qhull per scan** (4.0× overall across the 9
+scans, 1.9 s vs 7.6 s). Every hull is valid — no extreme vertices missed; on
+scans with flat sampled facets a few extra coplanar-boundary vertices appear
+(qhull merges those into non-simplicial facets; ffHull returns a simplicial
+hull). Run `python3 bench_scans.py` (needs `huggingface_hub`, `trimesh`).
+
+The float64 predicate path is intentional: on Ada GPUs fp64 is 1/64 rate and an
+fp32-first filter is ~6× faster *per predicate*, but the near-degenerate
+predicates that pervade coplanar facets and dense hulls make it oscillate and
+fall back, a net loss here — see `docs/` notes. The realized wins came from
+avoiding host↔device overhead: GPU-resident seed, no per-round syncs (CUDA
+graphs), `wp.empty` allocation, and launching flips over the live triangle count.
 
 ## Install
 
