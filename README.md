@@ -8,6 +8,15 @@ implementing the **Flip-Flop / ffHull** algorithm of Gao, Cao, Tan & Huang
 Everything but the initial tetrahedron and lower-dimensional fallbacks runs on
 the GPU as Warp kernels. The only geometric predicate is `orient3d`.
 
+<p align="center">
+  <img src="media/sphere_hull.webp" width="480"
+       alt="Points swirling on a sphere with the semi-transparent ffHull convex hull recomputed every frame">
+</p>
+
+<sub>Points swirl on a sphere while the convex hull is recomputed on the GPU and
+drawn semi-transparent on top every frame (headless polyscope; regenerate with
+`python3 scripts/make_anim.py`).</sub>
+
 ## Algorithm
 
 Two fully data-parallel phases:

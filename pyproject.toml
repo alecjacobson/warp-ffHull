@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["scipy>=1.7", "pytest>=7.0"]
+viz = ["polyscope>=2.6", "imageio", "imageio-ffmpeg"]
 
 [project.urls]
 Homepage = "https://github.com/alecjacobson/warp-ffHull"
