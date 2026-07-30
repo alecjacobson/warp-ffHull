@@ -228,12 +228,12 @@ def label_kernel(
     tri_adj: wp.array(dtype=wp.vec3i),
     tri_adj_slot: wp.array(dtype=wp.vec3i),
     tri_active: wp.array(dtype=wp.int32),
-    tri_count: wp.int32,
+    tri_count: wp.array(dtype=wp.int32),
     vertex_label: wp.array(dtype=wp.int32),
     changed: wp.array(dtype=wp.int32),
 ):
     t = wp.tid()
-    if t >= tri_count or tri_active[t] == 0:
+    if t >= tri_count[0] or tri_active[t] == 0:
         return
     adj = tri_adj[t]
     for i in range(3):
@@ -264,14 +264,14 @@ def propose_claim(
     tri_adj: wp.array(dtype=wp.vec3i),
     tri_adj_slot: wp.array(dtype=wp.vec3i),
     tri_active: wp.array(dtype=wp.int32),
-    tri_count: wp.int32,
+    tri_count: wp.array(dtype=wp.int32),
     vertex_label: wp.array(dtype=wp.int32),
     tri_claim: wp.array(dtype=wp.int32),
     prop_slot: wp.array(dtype=wp.int32),
     prop_type: wp.array(dtype=wp.int32),
 ):
     t = wp.tid()
-    if t >= tri_count or tri_active[t] == 0:
+    if t >= tri_count[0] or tri_active[t] == 0:
         return
     adj = tri_adj[t]
     for i in range(3):
@@ -371,14 +371,14 @@ def apply_flips(
     tri_adj: wp.array(dtype=wp.vec3i),
     tri_adj_slot: wp.array(dtype=wp.vec3i),
     tri_active: wp.array(dtype=wp.int32),
-    tri_count: wp.int32,
+    tri_count: wp.array(dtype=wp.int32),
     tri_claim: wp.array(dtype=wp.int32),
     prop_slot: wp.array(dtype=wp.int32),
     prop_type: wp.array(dtype=wp.int32),
     changed: wp.array(dtype=wp.int32),
 ):
     t = wp.tid()
-    if t >= tri_count or prop_type[t] == 0:
+    if t >= tri_count[0] or prop_type[t] == 0:
         return
     i1 = prop_slot[t]
     f = gather(tri_v, tri_adj, tri_adj_slot, t, i1)

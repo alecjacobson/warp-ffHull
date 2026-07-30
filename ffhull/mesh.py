@@ -48,8 +48,10 @@ class Mesh:
 
         # Counters / flags (single element device arrays)
         self.tri_count = wp.zeros(1, dtype=wp.int32, device=device)
+        self.old_count = wp.zeros(1, dtype=wp.int32, device=device)
         self.scratch_i = wp.zeros(1, dtype=wp.int32, device=device)
         self.changed = wp.zeros(1, dtype=wp.int32, device=device)
+        self.cond = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Flip scratch (triangle-indexed)
         self.tri_claim = wp.full(cap, INT_MAX, dtype=wp.int32, device=device)

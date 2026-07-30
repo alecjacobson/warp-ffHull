@@ -93,10 +93,10 @@ def split_faces(
     face_pivot: wp.array(dtype=wp.int32),
     face_children: wp.array(dtype=wp.vec3i),
     tri_count: wp.array(dtype=wp.int32),
-    old_count: wp.int32,
+    old_count: wp.array(dtype=wp.int32),
 ):
     t = wp.tid()
-    if t >= old_count:
+    if t >= old_count[0]:
         return
     if tri_active[t] == 0:
         return
@@ -145,21 +145,22 @@ def fix_adjacency(
     tri_adj_slot: wp.array(dtype=wp.vec3i),
     face_pivot: wp.array(dtype=wp.int32),
     face_children: wp.array(dtype=wp.vec3i),
-    old_count: wp.int32,
-    new_count: wp.int32,
+    old_count: wp.array(dtype=wp.int32),
+    tri_count: wp.array(dtype=wp.int32),
 ):
     # Pure gather: every triangle repairs ONLY its own adjacency, so there are
     # no cross-triangle writes and no races.  If a neighbour split this round,
     # redirect to the neighbour's child that retained the shared edge (its
     # external edge is always local slot 0).
     t = wp.tid()
-    if t >= new_count:
+    oc = old_count[0]
+    if t >= tri_count[0]:
         return
     # A "child" created this round (appended, or a split parent's reused slot)
     # has final internal sibling links in slots 1,2; only its external slot 0
     # may need redirecting.  Non-split old faces may redirect any slot.
-    is_child = t >= old_count
-    if t < old_count and face_pivot[t] != INT_MAX:
+    is_child = t >= oc
+    if t < oc and face_pivot[t] != INT_MAX:
         is_child = True
 
     adj = tri_adj[t]
@@ -170,7 +171,7 @@ def fix_adjacency(
         n = adj[i]
         if n < 0:
             continue
-        if n < old_count and face_pivot[n] != INT_MAX:
+        if n < oc and face_pivot[n] != INT_MAX:
             sl = aslot[i]                       # reciprocal slot of the shared edge in n
             fc = face_children[n]
             adj[i] = fc[(sl + 1) % 3]           # child_of_edge(n, sl)
@@ -212,3 +213,33 @@ def reassociate(
     point_owner[i] = new_owner
     if new_owner >= 0:
         wp.atomic_add(active_counter, 0, 1)
+
+
+# --- device-side count / control helpers (for sync-free, graph-capturable loops) ---
+
+@wp.kernel
+def snapshot_count(src: wp.array(dtype=wp.int32), dst: wp.array(dtype=wp.int32)):
+    dst[0] = src[0]
+
+
+@wp.kernel
+def zero_scalar(a: wp.array(dtype=wp.int32)):
+    a[0] = 0
+
+
+@wp.kernel
+def reset_growth(face_score: wp.array(dtype=wp.float64),
+                 face_pivot: wp.array(dtype=wp.int32),
+                 face_children: wp.array(dtype=wp.vec3i)):
+    t = wp.tid()
+    face_score[t] = wp.float64(0.0)
+    face_pivot[t] = INT_MAX
+    face_children[t] = wp.vec3i(-1, -1, -1)
+
+
+@wp.kernel
+def set_cond_gt0(val: wp.array(dtype=wp.int32), cond: wp.array(dtype=wp.int32)):
+    if val[0] > 0:
+        cond[0] = 1
+    else:
+        cond[0] = 0

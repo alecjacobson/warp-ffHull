@@ -111,26 +111,37 @@ def init_tetra(mesh: Mesh, pts: np.ndarray, tetra_idx: np.ndarray):
 
 
 # ----------------------------------------------------------------------------
-# Reset kernel for per-round growth scratch
+# Device-controlled loop helper (graph-capturable, no per-round host sync)
 # ----------------------------------------------------------------------------
 
-@wp.kernel
-def _reset_growth(face_score: wp.array(dtype=wp.float64),
-                  face_pivot: wp.array(dtype=wp.int32),
-                  face_children: wp.array(dtype=wp.vec3i)):
-    t = wp.tid()
-    face_score[t] = wp.float64(0.0)
-    face_pivot[t] = grow.INT_MAX
-    face_children[t] = wp.vec3i(-1, -1, -1)
+def _run_while(mesh: Mesh, cond, body, use_graph: bool, safety: int):
+    """Repeat ``body`` while device flag ``cond[0]`` stays nonzero.
+
+    With ``use_graph`` the loop is captured as a conditional CUDA graph and
+    replayed with zero host synchronisation.  The plain-Python fallback still
+    avoids per-round syncs except the single ``cond`` readback used to stop.
+    """
+    cond.fill_(1)
+    if use_graph:
+        with wp.ScopedCapture(mesh.device) as cap:
+            wp.capture_while(cond, body)
+        wp.capture_launch(cap.graph)
+    else:
+        for _ in range(safety):
+            body()
+            if int(cond.numpy()[0]) == 0:
+                break
 
 
 # ----------------------------------------------------------------------------
 # Phase A driver
 # ----------------------------------------------------------------------------
 
-def grow_star(mesh: Mesh, s: wp.vec3d, tetra_idx: np.ndarray, verbose=False):
+def grow_star(mesh: Mesh, s: wp.vec3d, tetra_idx: np.ndarray, verbose=False,
+              use_graph=True):
     dev = mesh.device
     n = mesh.n
+    cap = mesh.cap
 
     is_seed = np.zeros(n, dtype=np.int32)
     is_seed[tetra_idx] = 1
@@ -140,33 +151,29 @@ def grow_star(mesh: Mesh, s: wp.vec3d, tetra_idx: np.ndarray, verbose=False):
               inputs=[mesh.points, mesh.tri_v, s, 4, is_seed_wp, mesh.point_owner],
               device=dev)
 
-    max_iter = n + 8
-    for it in range(max_iter):
-        old_count = mesh.get_tri_count()
-        wp.launch(_reset_growth, dim=mesh.cap,
+    def body():
+        wp.launch(grow.snapshot_count, dim=1, inputs=[mesh.tri_count, mesh.old_count], device=dev)
+        wp.launch(grow.reset_growth, dim=cap,
                   inputs=[mesh.face_score, mesh.face_pivot, mesh.face_children], device=dev)
+        wp.launch(grow.zero_scalar, dim=1, inputs=[mesh.scratch_i], device=dev)
         wp.launch(grow.furthest_pass_a, dim=n,
                   inputs=[mesh.points, mesh.tri_v, mesh.point_owner, mesh.face_score], device=dev)
         wp.launch(grow.furthest_pass_b, dim=n,
                   inputs=[mesh.points, mesh.tri_v, mesh.point_owner, mesh.face_score, mesh.face_pivot],
                   device=dev)
-        wp.launch(grow.split_faces, dim=old_count,
+        wp.launch(grow.split_faces, dim=cap,
                   inputs=[mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot, mesh.tri_active,
-                          mesh.face_pivot, mesh.face_children, mesh.tri_count, old_count],
+                          mesh.face_pivot, mesh.face_children, mesh.tri_count, mesh.old_count],
                   device=dev)
-        new_count = mesh.get_tri_count()
-        wp.launch(grow.fix_adjacency, dim=new_count,
+        wp.launch(grow.fix_adjacency, dim=cap,
                   inputs=[mesh.tri_adj, mesh.tri_adj_slot, mesh.face_pivot, mesh.face_children,
-                          old_count, new_count], device=dev)
-        mesh.scratch_i.zero_()
+                          mesh.old_count, mesh.tri_count], device=dev)
         wp.launch(grow.reassociate, dim=n,
                   inputs=[mesh.points, mesh.tri_v, s, mesh.face_pivot, mesh.face_children,
                           mesh.point_owner, mesh.scratch_i], device=dev)
-        active = int(mesh.scratch_i.numpy()[0])
-        if verbose:
-            print(f"  grow it={it} tris={new_count} active_pts={active}")
-        if active == 0:
-            break
+        wp.launch(grow.set_cond_gt0, dim=1, inputs=[mesh.scratch_i, mesh.cond], device=dev)
+
+    _run_while(mesh, mesh.cond, body, use_graph, safety=n + 16)
     return mesh.get_tri_count()
 
 
@@ -189,31 +196,30 @@ def build_star(points_np: np.ndarray, device="cuda:0", verbose=False):
     return mesh, s, tetra_idx
 
 
-def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False):
+def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False, use_graph=True):
     dev = mesh.device
-    count = mesh.get_tri_count()
-    max_iter = 50 * mesh.n + 100
-    for it in range(max_iter):
-        wp.launch(flip.reset_flip, dim=mesh.cap,
+    cap = mesh.cap
+    tc = mesh.tri_count  # device count (unchanged by flips)
+
+    def body():
+        wp.launch(flip.reset_flip, dim=cap,
                   inputs=[mesh.tri_claim, mesh.prop_slot, mesh.prop_type], device=dev)
-        mesh.changed.zero_()
-        wp.launch(flip.label_kernel, dim=count,
+        wp.launch(grow.zero_scalar, dim=1, inputs=[mesh.changed], device=dev)
+        wp.launch(flip.label_kernel, dim=cap,
                   inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
-                          mesh.tri_active, count, mesh.vertex_label, mesh.changed], device=dev)
-        wp.launch(flip.propose_claim, dim=count,
+                          mesh.tri_active, tc, mesh.vertex_label, mesh.changed], device=dev)
+        wp.launch(flip.propose_claim, dim=cap,
                   inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
-                          mesh.tri_active, count, mesh.vertex_label,
+                          mesh.tri_active, tc, mesh.vertex_label,
                           mesh.tri_claim, mesh.prop_slot, mesh.prop_type], device=dev)
-        wp.launch(flip.apply_flips, dim=count,
+        wp.launch(flip.apply_flips, dim=cap,
                   inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
-                          mesh.tri_active, count, mesh.tri_claim, mesh.prop_slot,
+                          mesh.tri_active, tc, mesh.tri_claim, mesh.prop_slot,
                           mesh.prop_type, mesh.changed], device=dev)
-        ch = int(mesh.changed.numpy()[0])
-        if verbose and (it % 20 == 0 or ch == 0):
-            print(f"  flip it={it} changed={ch}")
-        if ch == 0:
-            break
-    return it
+
+    # `changed` doubles as the loop condition: each round zeroes it, then label/
+    # apply set it if any progress was made (new label or flip).
+    _run_while(mesh, mesh.changed, body, use_graph, safety=50 * mesh.n + 100)
 
 
 def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
