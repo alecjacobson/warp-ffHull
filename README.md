@@ -39,16 +39,45 @@ Two fully data-parallel phases:
 - Faces oriented so `orient3d(face, s) < 0`; then "p outside face" ⇔
   `orient3d(face, p) > 0`, and an edge is reflex ⇔ the neighbour apex is outside.
 
+### GPU-resident & graph-capturable
+- Seed selection (extreme points + affine-dimension test, `ffhull/seed.py`) runs
+  as Warp reductions on the device — no O(n) host passes.
+- Both phases carry all counts in device arrays and launch over a fixed capacity,
+  so each loop body is **captured once as a conditional CUDA graph**
+  (`wp.capture_while`) and replayed to convergence with **zero per-round host
+  synchronisation**. A device-side iteration cap guarantees termination.
+- `use_graph=False` gives an equivalent debug path.
+
+### Robustness
+- The float64 predicate is exact for full-dimensional inputs to aspect ratios
+  ~1e6. `convex_hull(robust=True)` (default) validates each result on-GPU (O(F)
+  reflex test + size-gated O(nF) containment) and, if a degenerate input yields
+  an invalid hull, **deterministically joggles and retries**.
+- `predicates.o3d_sign` provides a certified-filter + Simulation-of-Simplicity
+  sign (unit-tested) as a robust primitive; wiring it through the topology
+  kernels is future work (see `warp_orient3d_plan.md`).
+
 ## Status
 - [x] Phase A: parallel star-shaped growth
 - [x] Phase B: Flip-Flop convexification (2→2 + 3→1, V & D criteria)
+- [x] GPU-resident seed; sync-free, CUDA-graph-captured loops
 - [x] Lower-dimensional inputs (coincident / collinear / coplanar) + duplicates
-- [ ] Exact Shewchuk `orient3d` + Simulation of Simplicity (see
-  `warp_orient3d_plan.md`) — needed for exactly-coplanar facets and aspect
-  ratios beyond ~1e6.
+- [x] Robust on coplanar-facet / grid / near-degenerate input (joggle-retry)
+- [ ] Simulation of Simplicity wired through the topology kernels (predicate is
+  ready; needs consistent use in growth's furthest-point step)
 
-Matches `scipy.spatial.ConvexHull` exactly on sphere, gaussian, uniform-cube,
-and clustered inputs up to n = 50k in the test suite (and larger in `bench.py`).
+**Correctness:** 27-test suite passes; `stress.py` reports 16/16 valid on an
+adversarial battery (general-position exact vs `scipy.spatial.ConvexHull`,
+degenerate inputs verified as valid enclosing hulls).
+
+**Performance (NVIDIA L40, end-to-end incl. host↔device):**
+
+| input | n | ffHull | qhull | speedup |
+|-------|---|--------|-------|---------|
+| sphere (all extreme) | 1M | 0.79 s | 6.1 s | **7.7×** |
+| sphere | 5M | 5.1 s | 36 s | **7.1×** |
+| gaussian (tiny hull) | 1M | 43 ms | 146 ms | 3.4× |
+| gaussian | 5M | 0.39 s | 0.85 s | 2.2× |
 
 ## Usage
 ```python
@@ -58,13 +87,12 @@ from ffhull.hull import convex_hull
 pts = np.random.standard_normal((100_000, 3))
 faces = convex_hull(pts, device="cuda:0")          # (m, 3) outward triangles
 faces, verts = convex_hull(pts, return_vertices=True)
+# convex_hull(pts, use_graph=False, robust=False) to disable graph capture / retry
 ```
 
 ## Test & benchmark
 ```
-python3 tests/test_predicates.py
-python3 tests/test_growth.py
-python3 tests/test_hull.py
-python3 tests/test_degenerate.py       # or: pytest tests/
+pytest tests/            # 27 tests
+python3 stress.py        # robustness battery + perf sweep
 python3 bench.py
 ```
