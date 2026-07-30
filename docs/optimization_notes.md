@@ -29,7 +29,15 @@ Almost all the wall-clock was host↔device overhead, not hull compute:
    `wp.empty` arrays are reinitialized by the per-round kernels anyway. On the
    3-reps-per-scan benchmark this took the 9 scans **1.90 s → 1.35 s**.
 
-Net on the 9 scans: **2.71 s → 1.35 s (2× faster), 2.8× → 5.8× vs qhull.**
+6. **`live_faces` readback** — it did `mesh.tri_v.numpy()[:k]`, copying the whole
+   `2n`-capacity array (~58 MB) to host then slicing. Slice on-device first
+   (`mesh.tri_v[:k].numpy()`): **24.5 ms → 0.3 ms** for a small-hull scan.
+7. **Kill O(n) host passes** — the tolerance scale used `np.abs(points_np).max()`
+   over every point (~15 ms at 6.4 M); take it from the seed extremes instead.
+   Also folded the per-round `changed` reset into `reset_flip`.
+
+Net on the 9 scans: **2.71 s → 0.58 s (4.7× faster), 2.8× → 13.9× vs qhull.**
+Hermanubis (6.4 M pts) 592 → 96 ms (16× qhull).
 
 ## What didn't work: fp32-first predicate filter
 
@@ -82,11 +90,28 @@ It culls a big fraction, but the win is only modest and *situational*:
 The cull is left **opt-in** (`filter=True`); it's a real win only for very large
 *solid/volumetric* clouds where the hull time dominates the cull overhead.
 
-## Remaining levers (not done)
+## Triaged idea list (remaining)
 
+Current per-scan profile (c1, 1.8 M pts, ~42 ms): flip ~17 ms, grow ~9 ms,
+points upload (rebind) ~5 ms, seed ~2 ms.  Ordered by payoff / (1+difficulty):
+
+Low level / low risk:
+- **Skip re-upload on identical points** — `Mesh.rebind` re-uploads even when the
+  same array is hulled again (benchmark reps); tag the last-bound array and skip.
+- **Fewer flip kernels/round** — the label→propose→apply barriers are inherent,
+  but reset/advance can be trimmed further.
+
+Mid level:
 - **Active-point compaction in growth** — growth reprocesses all n points every
-  round (O(n·rounds)); a compacted active set would cut that. Small payoff here
-  (growth is ~12 % of a scan's time).
-- A cull that actually helps surface scans would likely need to cut the survivor
-  hull's fixed costs too (e.g. cull + tight-capacity workspace for the
-  survivors), or target much larger n where hull time ≫ cull overhead.
+  round (O(n·rounds)).  Compact the live point set so late rounds are cheap.
+- **Fuse growth kernels** similarly to reduce launch count.
+
+High level (algorithmic, harder / uncertain):
+- **Fewer flip rounds** — ~200 rounds for a ~2 k-face hull; the count is the
+  flip-propagation diameter.  A better flip schedule or a growth that inserts
+  fewer non-extreme vertices would cut the rounds (the flip floor is
+  rounds × ~5 graph nodes).
+- **Interior cull for very large n** (≥ ~50 M) or volumetric clouds, where hull
+  time ≫ cull overhead — the cull is opt-in (`filter=True`) for that regime.
+  It does NOT help surface scans (no cheap deep interior; the marginally-inside
+  points need fp64 depth resolution — see the fp32-cull note).
