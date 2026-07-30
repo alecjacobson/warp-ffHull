@@ -92,8 +92,9 @@ degenerate inputs verified as valid enclosing hulls).
 
 **Real-world scans** — [`alecjacobson/threedscans`](https://huggingface.co/datasets/alecjacobson/threedscans)
 (Oliver Laric's high-res museum scans; raw STL vertices, 1.8–6.4 M points each):
-ffHull is **4.8–6.5× faster than qhull per scan** (5.8× overall across the 9
-scans, 1.35 s vs 7.8 s). Every hull is valid — no extreme vertices missed; on
+ffHull is **8–16× faster than qhull per scan** (13.9× overall across the 9
+scans, 0.58 s vs 8.0 s; Hermanubis 6.4 M pts in 96 ms). Every hull is valid — no
+extreme vertices missed; on
 scans with flat sampled facets a few extra coplanar-boundary vertices appear
 (qhull merges those into non-simplicial facets; ffHull returns a simplicial
 hull). Run `python3 bench_scans.py` (needs `huggingface_hub`, `trimesh`).
