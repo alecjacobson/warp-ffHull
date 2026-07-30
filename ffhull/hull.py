@@ -202,21 +202,24 @@ def build_star(points_np: np.ndarray, device="cuda:0", verbose=False, use_graph=
 
 def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False, use_graph=True):
     dev = mesh.device
-    cap = mesh.cap
     tc = mesh.tri_count  # device count (unchanged by flips)
+    # Flips never grow the triangle count, so launch over the post-growth count
+    # (read once) rather than the full 2n capacity -- for a small hull from a
+    # large point cloud this is thousands of threads instead of millions.
+    count = mesh.get_tri_count()
 
     def body():
-        wp.launch(flip.reset_flip, dim=cap,
+        wp.launch(flip.reset_flip, dim=count,
                   inputs=[mesh.tri_claim, mesh.prop_slot, mesh.prop_type], device=dev)
         wp.launch(grow.zero_scalar, dim=1, inputs=[mesh.changed], device=dev)
-        wp.launch(flip.label_kernel, dim=cap,
+        wp.launch(flip.label_kernel, dim=count,
                   inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
                           mesh.tri_active, tc, mesh.vertex_label, mesh.changed], device=dev)
-        wp.launch(flip.propose_claim, dim=cap,
+        wp.launch(flip.propose_claim, dim=count,
                   inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
                           mesh.tri_active, tc, mesh.vertex_label,
                           mesh.tri_claim, mesh.prop_slot, mesh.prop_type], device=dev)
-        wp.launch(flip.apply_flips, dim=cap,
+        wp.launch(flip.apply_flips, dim=count,
                   inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
                           mesh.tri_active, tc, mesh.tri_claim, mesh.prop_slot,
                           mesh.prop_type, mesh.changed], device=dev)
@@ -277,7 +280,7 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
         # Local reflex test is always cheap; for modest n also run the global
         # O(n*F) containment test, which catches tangled (non-simple) results
         # that a local test misses (the failure mode on exact-degenerate input).
-        wp.launch(flip.check_convex, dim=mesh.cap,
+        wp.launch(flip.check_convex, dim=count,
                   inputs=[mesh.points, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
                           mesh.tri_active, mesh.tri_count, wp.float64(convex_tol),
                           mesh.convex_flag], device=device)
