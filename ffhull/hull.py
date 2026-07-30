@@ -231,8 +231,11 @@ def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False, use_graph=True):
     _run_while(mesh, mesh.cond, body, use_graph, safety=FLIP_MAXIT)
 
 
+FILTER_THRESHOLD = 50_000   # only cull for point clouds large enough to benefit
+
+
 def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
-                return_vertices=False, use_graph=True, robust=True):
+                return_vertices=False, use_graph=True, robust=True, filter=False):
     """Compute the 3D convex hull.
 
     Returns an (m,3) int array of face vertex indices into ``points_np``
@@ -240,19 +243,44 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
     classification run on the GPU (``ffhull.seed``); genuinely lower-dimensional
     inputs (coincident, collinear, coplanar) are dispatched to a host handler.
     With ``return_vertices=True`` also returns the extreme-vertex indices.
+
+    For large clouds a conservative interior-point cull (``ffhull.filter``) runs
+    first, discarding deep-interior points before the exact hull; set
+    ``filter=False`` to disable it.
     """
     from . import degenerate, seed as seedmod
     points_np = np.ascontiguousarray(points_np, dtype=np.float64)
+    n = len(points_np)
 
     # Affine dimension is judged on the true input (a joggle would hide it).
     # Upload only the points for this check, not a full (2n-capacity) mesh.
     _pchk = wp.array(points_np, dtype=wp.vec3d, device=device)
-    dim0, _, _ = seedmod.build_seed(_pchk, len(points_np), device)
-    del _pchk
+    dim0, _, _ = seedmod.build_seed(_pchk, n, device)
     if dim0 < 3:
+        del _pchk
         d, info = degenerate.analyze_dimension(points_np)
         faces, verts = degenerate.hull_lowdim(points_np, min(dim0, d), info)
         return (faces, verts) if return_vertices else faces
+
+    # Conservative interior-point cull: discard deep-interior points, then run
+    # the exact hull on the survivors and map indices back.  Never drops a true
+    # hull vertex (survivors include every point on/outside the inner hull H0).
+    if filter and n >= FILTER_THRESHOLD:
+        from . import filter as filt
+        keep = filt.cull_indices(
+            _pchk, points_np, n, device,
+            hull_fn=lambda c: convex_hull(c, device=device, use_graph=use_graph,
+                                          robust=robust, filter=False))
+        del _pchk
+        if keep is not None and len(keep) < 0.6 * n:
+            if verbose:
+                print(f"  cull: {n} -> {len(keep)} survivors ({100*len(keep)/n:.1f}%)")
+            f_local = convex_hull(points_np[keep], device=device, verbose=verbose,
+                                  use_graph=use_graph, robust=robust, filter=False)
+            faces = keep[f_local]
+            return (faces, np.unique(faces)) if return_vertices else faces
+    else:
+        del _pchk
 
     scale = float(np.abs(points_np).max() + 1.0)
     convex_tol = 1e-6 * scale ** 3

@@ -131,6 +131,9 @@ pts = np.random.standard_normal((100_000, 3))
 faces = convex_hull(pts, device="cuda:0")          # (m, 3) outward triangles
 faces, verts = convex_hull(pts, return_vertices=True)
 # convex_hull(pts, use_graph=False, robust=False) to disable graph capture / retry
+# convex_hull(pts, filter=True)  # opt-in conservative interior-point cull;
+#   discards points inside a coarse inner hull first. A win for large SOLID /
+#   volumetric clouds (most points are deep interior); a no-op for surface scans.
 ```
 
 ## Test & benchmark

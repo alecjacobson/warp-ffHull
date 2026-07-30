@@ -49,6 +49,22 @@ breaks the error bound); the fp64 fallback must use the **plain** sign, not SoS
 built for it). The tested `predicates.o3d_sign` (certified fp64 + SoS) remains
 as a standalone robust primitive.
 
+## Conservative interior cull (`ffhull/filter.py`, opt-in `filter=True`)
+
+Build a coarse *inner* hull `H0` from a subset of the points (a strided sample +
+the axis extremes), then discard every input point strictly inside `H0`. Because
+`H0 ⊆ H` (hull of a subset), inside-`H0` ⟹ inside-`H` ⟹ not a hull vertex — so
+it never drops a true vertex. It culls **97–99.7 %** of a solid/volumetric cloud
+(gaussian, uniform ball/cube).
+
+But the win is only modest (≈1.1–1.3× on 2–5 M solid clouds) and it does not help
+surface scans (whose points sit *on* the hull boundary and survive). The reason
+is the cull cost: testing each of `n` points against all `F0` faces of `H0` is
+`O(n·F0)` (≈50 ms for a 1.8 M-point scan with `F0≈470`), plus building `H0`. A
+grid/BVH cull — test *cells* against `H0`, then discard points in interior cells
+in `O(n)` — would make it a large win (the "hash-grid" idea); it's the natural
+next step and why the filter is opt-in for now.
+
 ## Remaining levers (not done)
 
 - **Buffer reuse across calls** — a persistent workspace so batch/throughput
