@@ -16,7 +16,8 @@ the GPU as Warp kernels. The only geometric predicate is `orient3d`.
 <sub>Points drift on a sphere and bob slightly in and out, so they move on and off
 the hull; the convex hull is recomputed on the GPU every frame (gold = current
 hull vertices, slate = currently interior). Headless polyscope; regenerate with
-`python3 scripts/make_anim.py`.</sub>
+`python3 scripts/make_anim.py`. Also available as a
+<a href="media/sphere_hull.gif">GIF</a>.</sub>
 
 ## Algorithm
 

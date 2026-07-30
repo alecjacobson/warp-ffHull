@@ -6,4 +6,3 @@ docs/paper_text.txt
 build/
 dist/
 imgui.ini
-media/*.gif

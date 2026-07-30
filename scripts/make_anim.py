@@ -121,10 +121,12 @@ def main():
     webp = os.path.join(OUT, "sphere_hull.webp")
     pal = os.path.join(tmp, "palette.png")
     vf = f"fps={FPS},scale=520:-1:flags=lanczos"
-    subprocess.run([ffmpeg, "-y", "-i", pat, "-vf", vf + ",palettegen=stats_mode=diff", pal],
+    # smaller/leaner settings for the gif (half frame rate, 400px)
+    gvf = f"fps={FPS // 2},scale=400:-1:flags=lanczos"
+    subprocess.run([ffmpeg, "-y", "-i", pat, "-vf", gvf + ",palettegen=stats_mode=diff:max_colors=128", pal],
                    check=True, capture_output=True)
     subprocess.run([ffmpeg, "-y", "-i", pat, "-i", pal, "-lavfi",
-                    vf + "[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3", "-loop", "0", gif],
+                    gvf + "[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3", "-loop", "0", gif],
                    check=True, capture_output=True)
     subprocess.run([ffmpeg, "-y", "-i", pat, "-vf", vf, "-c:v", "libwebp_anim",
                     "-lossless", "0", "-q:v", "72", "-loop", "0", webp],
