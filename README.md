@@ -13,9 +13,10 @@ the GPU as Warp kernels. The only geometric predicate is `orient3d`.
        alt="Points swirling on a sphere with the semi-transparent ffHull convex hull recomputed every frame">
 </p>
 
-<sub>Points swirl on a sphere while the convex hull is recomputed on the GPU and
-drawn semi-transparent on top every frame (headless polyscope; regenerate with
-`python3 scripts/make_anim.py`).</sub>
+<sub>Points drift on a sphere and bob slightly in and out, so they move on and off
+the hull; the convex hull is recomputed on the GPU every frame (gold = current
+hull vertices, slate = currently interior). Headless polyscope; regenerate with
+`python3 scripts/make_anim.py`.</sub>
 
 ## Algorithm
 

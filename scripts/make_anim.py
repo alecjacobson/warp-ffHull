@@ -24,11 +24,12 @@ DEV = "cuda:0"
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "media")
 os.makedirs(OUT, exist_ok=True)
 
-# palette (soft periwinkle surface, warm-gold points, deep-blue edges)
+# palette (soft periwinkle surface, warm-gold hull points, slate interior points)
 SURF = (0.60, 0.68, 0.86)
 EDGE = (0.18, 0.22, 0.38)
-PTS = (0.96, 0.72, 0.22)
-TRANSPARENCY = 1.0   # 1.0 = opaque; lower for a translucent glass look
+HULL_PT = (0.96, 0.72, 0.22)     # points currently on the hull
+INNER_PT = (0.45, 0.50, 0.58)    # points currently inside (non-extreme)
+TRANSPARENCY = 0.9               # slight translucency
 
 
 def sphere_points(n, seed=0):
@@ -52,12 +53,16 @@ def rodrigues_batch(p, axes, ang):
 
 
 def main():
-    p0 = sphere_points(N)
+    p0 = sphere_points(N)                     # unit directions
     rng = np.random.default_rng(1)
     axes = rng.standard_normal((N, 3)); axes /= np.linalg.norm(axes, axis=1, keepdims=True)
-    amp = rng.uniform(0.10, 0.38, N)          # gentle per-point swing
+    amp = rng.uniform(0.08, 0.28, N)          # gentle tangential swing
     phase = rng.uniform(0, 2 * np.pi, N)
     spin_axis = np.array([0.0, 1.0, 0.0])     # slow full turn about up
+    # radial bob so points dip in/out of the hull (integer freq -> seamless loop)
+    r_amp = rng.uniform(0.02, 0.07, N)
+    r_freq = rng.integers(1, 3, N).astype(float)
+    r_phase = rng.uniform(0, 2 * np.pi, N)
 
     ps.set_allow_headless_backends(True)
     ps.set_program_name("ffHull")
@@ -74,7 +79,7 @@ def main():
     ps.set_shadow_blur_iters(8)
     try:
         ps.set_ground_plane_height_mode(ps.GroundPlaneHeightMode.manual)
-        ps.set_ground_plane_height(-1.02)
+        ps.set_ground_plane_height(-1.30)
     except Exception:
         pass
 
@@ -82,11 +87,13 @@ def main():
     for f in range(FRAMES):
         t = f / FRAMES
         ang = amp * np.sin(2 * np.pi * t + phase)
-        pts = rodrigues_batch(p0, axes, ang)
-        pts = rodrigues(pts, spin_axis, np.full(N, 2 * np.pi * t))
-        pts /= np.linalg.norm(pts, axis=1, keepdims=True)
+        d = rodrigues_batch(p0, axes, ang)                       # swirl on sphere
+        d = rodrigues(d, spin_axis, np.full(N, 2 * np.pi * t))   # slow global turn
+        d /= np.linalg.norm(d, axis=1, keepdims=True)
+        r = 1.0 + r_amp * np.sin(2 * np.pi * r_freq * t + r_phase)  # radial bob
+        pts = np.ascontiguousarray(d * r[:, None])
 
-        faces = convex_hull(np.ascontiguousarray(pts), device=DEV)
+        faces = convex_hull(pts, device=DEV)
         # ffHull winds faces so orient3d(face, s) < 0 (CW seen from outside);
         # polyscope treats CCW as front, so reverse for correct outward shading.
         faces = np.ascontiguousarray(faces[:, ::-1])
@@ -96,8 +103,12 @@ def main():
                                      transparency=TRANSPARENCY, back_face_policy="cull",
                                      smooth_shade=False)
         m.set_material("clay")
-        pc = ps.register_point_cloud("points", pts, radius=0.0115, color=PTS)
+        # split points: on-hull (gold) vs currently-interior (slate)
+        on_hull = np.zeros(N, bool); on_hull[np.unique(faces)] = True
+        pc = ps.register_point_cloud("hull_points", pts[on_hull], radius=0.013, color=HULL_PT)
         pc.set_material("clay")
+        pi = ps.register_point_cloud("inner_points", pts[~on_hull], radius=0.009, color=INNER_PT)
+        pi.set_material("clay")
 
         ps.look_at((2.1, 1.5, 2.6), (0.0, -0.05, 0.0))
         ps.screenshot(os.path.join(tmp, f"f{f:04d}.png"), transparent_bg=False)
