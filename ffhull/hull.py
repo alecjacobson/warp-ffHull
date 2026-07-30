@@ -212,8 +212,7 @@ def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False, use_graph=True):
 
     def body():
         wp.launch(flip.reset_flip, dim=count,
-                  inputs=[mesh.tri_claim, mesh.prop_slot, mesh.prop_type], device=dev)
-        wp.launch(grow.zero_scalar, dim=1, inputs=[mesh.changed], device=dev)
+                  inputs=[mesh.tri_claim, mesh.prop_slot, mesh.prop_type, mesh.changed], device=dev)
         wp.launch(flip.label_kernel, dim=count,
                   inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
                           mesh.tri_active, tc, mesh.vertex_label, mesh.changed], device=dev)
@@ -318,7 +317,9 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
         faces, verts = degenerate.hull_lowdim(points_np, min(dim0, d), info)
         return (faces, verts) if return_vertices else faces
 
-    scale = float(np.abs(points_np).max() + 1.0)
+    # coordinate scale for the tolerance, from the seed extremes (avoids an
+    # O(n) host pass over all points).
+    scale = float(np.abs(sp0).max() + 1.0)
     convex_tol = 1e-6 * scale ** 3
     for attempt in range(5):
         if attempt == 0:

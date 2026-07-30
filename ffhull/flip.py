@@ -458,8 +458,11 @@ def _apply_31(points: wp.array(dtype=wp.vec3d), s: wp.vec3d,
 @wp.kernel
 def reset_flip(tri_claim: wp.array(dtype=wp.int32),
                prop_slot: wp.array(dtype=wp.int32),
-               prop_type: wp.array(dtype=wp.int32)):
+               prop_type: wp.array(dtype=wp.int32),
+               changed: wp.array(dtype=wp.int32)):
     t = wp.tid()
+    if t == 0:
+        changed[0] = 0   # fold the per-round `changed` reset in (one fewer launch)
     tri_claim[t] = INT_MAX
     prop_slot[t] = -1
     prop_type[t] = 0
