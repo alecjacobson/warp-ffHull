@@ -198,6 +198,10 @@ def reassociate(
         # owner not split this round: keep association, still outside
         wp.atomic_add(active_counter, 0, 1)
         return
+    if i == face_pivot[t]:
+        # this point was just inserted as a vertex this round: retire it
+        point_owner[i] = -1
+        return
     fc = face_children[t]
     p = points[i]
     new_owner = wp.int32(-1)
@@ -238,8 +242,13 @@ def reset_growth(face_score: wp.array(dtype=wp.float64),
 
 
 @wp.kernel
-def set_cond_gt0(val: wp.array(dtype=wp.int32), cond: wp.array(dtype=wp.int32)):
-    if val[0] > 0:
+def advance_cond(flag: wp.array(dtype=wp.int32), itc: wp.array(dtype=wp.int32),
+                 maxit: wp.int32, cond: wp.array(dtype=wp.int32)):
+    # bump the iteration counter and continue only while there is progress and
+    # we are under the safety cap (guards against non-termination on degenerate
+    # inputs inside the capture_while device loop).
+    itc[0] = itc[0] + 1
+    if flag[0] != 0 and itc[0] < maxit:
         cond[0] = 1
     else:
         cond[0] = 0

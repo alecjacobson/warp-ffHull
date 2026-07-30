@@ -7,6 +7,11 @@ from .mesh import Mesh, INT_MAX
 from . import grow
 from . import flip
 
+# Safety cap on Flip-Flop rounds inside the device loop.  Convergence is fast
+# for well-conditioned inputs; hitting this cap signals a degenerate case, which
+# the robust wrapper resolves by joggling and retrying.
+FLIP_MAXIT = 20000
+
 
 # ----------------------------------------------------------------------------
 # Host-side setup
@@ -167,8 +172,10 @@ def grow_star(mesh: Mesh, s: wp.vec3d, tetra_idx: np.ndarray, verbose=False,
         wp.launch(grow.reassociate, dim=n,
                   inputs=[mesh.points, mesh.tri_v, s, mesh.face_pivot, mesh.face_children,
                           mesh.point_owner, mesh.scratch_i], device=dev)
-        wp.launch(grow.set_cond_gt0, dim=1, inputs=[mesh.scratch_i, mesh.cond], device=dev)
+        wp.launch(grow.advance_cond, dim=1,
+                  inputs=[mesh.scratch_i, mesh.iter_count, n + 16, mesh.cond], device=dev)
 
+    mesh.iter_count.zero_()
     _run_while(mesh, mesh.cond, body, use_graph, safety=n + 16)
     return mesh.get_tri_count()
 
@@ -213,14 +220,16 @@ def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False, use_graph=True):
                   inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
                           mesh.tri_active, tc, mesh.tri_claim, mesh.prop_slot,
                           mesh.prop_type, mesh.changed], device=dev)
+        # `changed` records progress this round; fold in the safety cap.
+        wp.launch(grow.advance_cond, dim=1,
+                  inputs=[mesh.changed, mesh.iter_count, FLIP_MAXIT, mesh.cond], device=dev)
 
-    # `changed` doubles as the loop condition: each round zeroes it, then label/
-    # apply set it if any progress was made (new label or flip).
-    _run_while(mesh, mesh.changed, body, use_graph, safety=50 * mesh.n + 100)
+    mesh.iter_count.zero_()
+    _run_while(mesh, mesh.cond, body, use_graph, safety=FLIP_MAXIT)
 
 
 def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
-                return_vertices=False, use_graph=True):
+                return_vertices=False, use_graph=True, robust=True):
     """Compute the 3D convex hull.
 
     Returns an (m,3) int array of face vertex indices into ``points_np``
@@ -232,16 +241,52 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
     from . import degenerate, seed as seedmod
     points_np = np.ascontiguousarray(points_np, dtype=np.float64)
 
-    mesh = Mesh(points_np, device)
-    dim, tetra_idx, seed_pts = seedmod.build_seed(mesh.points, mesh.n, device)
-    if dim < 3:
+    # Affine dimension is judged on the true input (a joggle would hide it).
+    dim0, _, _ = seedmod.build_seed(Mesh(points_np, device).points, len(points_np), device)
+    if dim0 < 3:
         d, info = degenerate.analyze_dimension(points_np)
-        faces, verts = degenerate.hull_lowdim(points_np, min(dim, d), info)
+        faces, verts = degenerate.hull_lowdim(points_np, min(dim0, d), info)
         return (faces, verts) if return_vertices else faces
 
-    s = init_tetra(mesh, seed_pts, tetra_idx)
-    grow_star(mesh, s, tetra_idx, verbose=verbose, use_graph=use_graph)
-    flip_convexify(mesh, s, verbose=verbose, use_graph=use_graph)
+    scale = float(np.abs(points_np).max() + 1.0)
+    convex_tol = 1e-6 * scale ** 3
+    mesh = None
+    for attempt in range(5):
+        if attempt == 0:
+            work = points_np
+        else:
+            # deterministic joggle to escape exact/near degeneracies (coplanar
+            # facets etc.); magnitude grows each retry, hull indices unchanged.
+            mag = 1e-8 * scale * (10.0 ** attempt)
+            jog = np.random.default_rng(attempt).standard_normal(points_np.shape)
+            work = points_np + mag * jog
+        mesh = Mesh(work, device)
+        dim, tetra_idx, seed_pts = seedmod.build_seed(mesh.points, mesh.n, device)
+        if dim < 3:
+            continue  # joggle collapsed dimension (shouldn't happen); retry
+        s = init_tetra(mesh, seed_pts, tetra_idx)
+        grow_star(mesh, s, tetra_idx, verbose=verbose, use_graph=use_graph)
+        flip_convexify(mesh, s, verbose=verbose, use_graph=use_graph)
+        if not robust:
+            break
+        mesh.convex_flag.zero_()
+        count = mesh.get_tri_count()
+        # Local reflex test is always cheap; for modest n also run the global
+        # O(n*F) containment test, which catches tangled (non-simple) results
+        # that a local test misses (the failure mode on exact-degenerate input).
+        wp.launch(flip.check_convex, dim=mesh.cap,
+                  inputs=[mesh.points, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
+                          mesh.tri_active, mesh.tri_count, wp.float64(convex_tol),
+                          mesh.convex_flag], device=device)
+        if mesh.n * count <= 400_000_000:
+            wp.launch(flip.check_contains, dim=mesh.n,
+                      inputs=[mesh.points, mesh.tri_v, mesh.tri_active, count,
+                              wp.float64(convex_tol), mesh.convex_flag], device=device)
+        if int(mesh.convex_flag.numpy()[0]) == 0:
+            break  # a genuine, enclosing convex hull
+        if verbose:
+            print(f"  invalid hull (attempt {attempt}); joggling and retrying")
+
     faces = live_faces(mesh)
     if return_vertices:
         return faces, np.unique(faces)

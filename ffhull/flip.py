@@ -463,3 +463,50 @@ def reset_flip(tri_claim: wp.array(dtype=wp.int32),
     tri_claim[t] = INT_MAX
     prop_slot[t] = -1
     prop_type[t] = 0
+
+
+@wp.kernel
+def check_contains(points: wp.array(dtype=wp.vec3d),
+                   tri_v: wp.array(dtype=wp.vec3i),
+                   tri_active: wp.array(dtype=wp.int32),
+                   tri_count: wp.int32,
+                   tol: wp.float64,
+                   flag: wp.array(dtype=wp.int32)):
+    # O(n*F) global validity: set flag if point i is strictly outside any face
+    # (i.e. the surface does not enclose it) -> the hull is invalid/tangled.
+    i = wp.tid()
+    p = points[i]
+    for t in range(tri_count):
+        if tri_active[t] == 0:
+            continue
+        tv = tri_v[t]
+        if orient3d(points[tv[0]], points[tv[1]], points[tv[2]], p) > tol:
+            flag[0] = 1
+            return
+
+
+@wp.kernel
+def check_convex(points: wp.array(dtype=wp.vec3d),
+                 tri_v: wp.array(dtype=wp.vec3i),
+                 tri_adj: wp.array(dtype=wp.vec3i),
+                 tri_adj_slot: wp.array(dtype=wp.vec3i),
+                 tri_active: wp.array(dtype=wp.int32),
+                 tri_count: wp.array(dtype=wp.int32),
+                 tol: wp.float64,
+                 flag: wp.array(dtype=wp.int32)):
+    # O(F) convexity test: set flag if any edge is reflex beyond tol (neighbour
+    # apex strictly outside this face's plane).
+    t = wp.tid()
+    if t >= tri_count[0] or tri_active[t] == 0:
+        return
+    tv = tri_v[t]
+    a = points[tv[0]]; b = points[tv[1]]; c = points[tv[2]]
+    adj = tri_adj[t]
+    aslot = tri_adj_slot[t]
+    for i in range(3):
+        n = adj[i]
+        if n < 0:
+            continue
+        d = tri_v[n][aslot[i]]
+        if orient3d(a, b, c, points[d]) > tol:
+            flag[0] = 1

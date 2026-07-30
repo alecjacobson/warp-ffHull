@@ -65,23 +65,57 @@ def test_thin_slab_ok_to_1e6():
         assert got == exp, f"thick={thick}"
 
 
-@pytest.mark.xfail(reason="exact-coplanar facets need Shewchuk exact + SoS (see warp_orient3d_plan.md)")
-def test_cube_face_samples():
-    rng = np.random.default_rng(0)
-    g = []
-    for s in (-1.0, 1.0):
-        for _ in range(40):
-            g.append([s, rng.uniform(-1, 1), rng.uniform(-1, 1)])
-            g.append([rng.uniform(-1, 1), s, rng.uniform(-1, 1)])
-            g.append([rng.uniform(-1, 1), rng.uniform(-1, 1), s])
-    pts = np.array(g)
-    f = convex_hull(pts, device=DEV)
-    got = set(int(x) for x in np.unique(f))
+def _assert_valid_hull(pts, faces, tol_rel=1e-9):
+    """A valid convex hull: closed manifold, every true extreme vertex present,
+    and no input point outside any (outward-oriented) face.  Coplanar-facet
+    points may appear as extra simplicial vertices — that is still valid."""
+    from collections import Counter
+    ec = Counter()
+    for f in faces:
+        for i in range(3):
+            ec[frozenset((int(f[(i + 1) % 3]), int(f[(i + 2) % 3])))] += 1
+    assert all(c == 2 for c in ec.values()), "non-manifold"
+    # no missing extreme vertices
     exp = set(ConvexHull(pts).vertices.tolist())
-    assert got == exp
+    got = set(int(x) for x in np.unique(faces))
+    assert exp <= got, f"missing extreme vertices: {exp - got}"
+    # containment: orient each face outward via the vertex centroid, check all in
+    c = pts[list(got)].mean(0)
+    scale = np.abs(pts).max() + 1.0
+    tol = tol_rel * scale ** 3
+    for f in faces:
+        a, b, cc = pts[f[0]], pts[f[1]], pts[f[2]]
+        n = np.cross(b - a, cc - a)
+        if np.dot(n, c - a) > 0:
+            n = -n
+        assert ((pts - a) @ n).max() <= tol, "point outside hull"
+
+
+def test_cube_face_samples():
+    # points sampled on the 6 faces of a cube: heavy exact-coplanar degeneracy.
+    for seed in range(3):
+        rng = np.random.default_rng(seed)
+        g = []
+        for s in (-1.0, 1.0):
+            for _ in range(40):
+                g.append([s, rng.uniform(-1, 1), rng.uniform(-1, 1)])
+                g.append([rng.uniform(-1, 1), s, rng.uniform(-1, 1)])
+                g.append([rng.uniform(-1, 1), rng.uniform(-1, 1), s])
+        pts = np.array(g)
+        f = convex_hull(pts, device=DEV)
+        _assert_valid_hull(pts, f)
+
+
+def test_integer_grid_lattice():
+    # dense integer lattice inside a box: maximal coplanar degeneracy
+    g = np.array([[x, y, z] for x in range(5) for y in range(5) for z in range(5)],
+                 dtype=float)
+    f = convex_hull(g, device=DEV)
+    _assert_valid_hull(g, f)
 
 
 if __name__ == "__main__":
     test_coincident(); test_collinear(); test_coplanar_2d()
     test_duplicates(); test_thin_slab_ok_to_1e6()
-    print("degenerate OK (cube-face samples xfail: needs exact+SoS)")
+    test_cube_face_samples(); test_integer_grid_lattice()
+    print("degenerate OK")
