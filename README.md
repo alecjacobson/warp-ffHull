@@ -92,8 +92,8 @@ degenerate inputs verified as valid enclosing hulls).
 
 **Real-world scans** — [`alecjacobson/threedscans`](https://huggingface.co/datasets/alecjacobson/threedscans)
 (Oliver Laric's high-res museum scans; raw STL vertices, 1.8–6.4 M points each):
-ffHull is **3.4–5.7× faster than qhull per scan** (4.0× overall across the 9
-scans, 1.9 s vs 7.6 s). Every hull is valid — no extreme vertices missed; on
+ffHull is **4.8–6.5× faster than qhull per scan** (5.8× overall across the 9
+scans, 1.35 s vs 7.8 s). Every hull is valid — no extreme vertices missed; on
 scans with flat sampled facets a few extra coplanar-boundary vertices appear
 (qhull merges those into non-simplicial facets; ffHull returns a simplicial
 hull). Run `python3 bench_scans.py` (needs `huggingface_hub`, `trimesh`).
@@ -103,7 +103,8 @@ fp32-first filter is ~6× faster *per predicate*, but the near-degenerate
 predicates that pervade coplanar facets and dense hulls make it oscillate and
 fall back, a net loss here — see `docs/` notes. The realized wins came from
 avoiding host↔device overhead: GPU-resident seed, no per-round syncs (CUDA
-graphs), `wp.empty` allocation, and launching flips over the live triangle count.
+graphs), `wp.empty` allocation, launching flips over the live triangle count,
+and reusing the workspace across calls. See `docs/optimization_notes.md`.
 
 ## Install
 

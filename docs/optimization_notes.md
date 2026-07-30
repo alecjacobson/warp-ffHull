@@ -23,7 +23,13 @@ Almost all the wall-clock was host↔device overhead, not hull compute:
    millions of no-op early-return threads per round into thousands. Flip time
    for a 1.8 M-point scan: 42 → 20 ms; ≈ another 20 % overall.
 
-Net on the 9 scans: **2.71 s → 1.90 s (~30 % faster), 2.8× → 4.0× vs qhull.**
+5. **Workspace reuse** — a small pool keyed by point count reuses the
+   `2n`-capacity arrays across calls (batch workloads, and the joggle retries
+   within one call). `Mesh.rebind()` re-uploads points + resets counters;
+   `wp.empty` arrays are reinitialized by the per-round kernels anyway. On the
+   3-reps-per-scan benchmark this took the 9 scans **1.90 s → 1.35 s**.
+
+Net on the 9 scans: **2.71 s → 1.35 s (2× faster), 2.8× → 5.8× vs qhull.**
 
 ## What didn't work: fp32-first predicate filter
 
@@ -57,19 +63,30 @@ the axis extremes), then discard every input point strictly inside `H0`. Because
 it never drops a true vertex. It culls **97–99.7 %** of a solid/volumetric cloud
 (gaussian, uniform ball/cube).
 
-But the win is only modest (≈1.1–1.3× on 2–5 M solid clouds) and it does not help
-surface scans (whose points sit *on* the hull boundary and survive). The reason
-is the cull cost: testing each of `n` points against all `F0` faces of `H0` is
-`O(n·F0)` (≈50 ms for a 1.8 M-point scan with `F0≈470`), plus building `H0`. A
-grid/BVH cull — test *cells* against `H0`, then discard points in interior cells
-in `O(n)` — would make it a large win (the "hash-grid" idea); it's the natural
-next step and why the filter is opt-in for now.
+It culls a big fraction, but the win is only modest and *situational*:
+
+- The cull cost is `O(n·F0)` — testing each of `n` points against `F0` faces of
+  `H0` (≈50 ms for a 1.8 M scan, `F0≈470`), plus ~19 ms to build `H0`. That
+  overhead is comparable to the whole hull, so it's a net loss below ~5 M points.
+- **Surface scans don't benefit.** With a tight `H0` the cull rate looks high,
+  but their points sit near the hull boundary, and — critically — even a small
+  survivor set doesn't shrink the survivor hull's *fixed* costs (allocation,
+  growth) enough to beat the cull overhead.
+- A **grid cull** was implemented and measured (test grid *cells* against `H0`,
+  classify points by cell in `O(n)`, only occupied cells tested, cell = center
+  eroded by its circumradius): it was **slower** than the per-point cull here.
+  At a useful resolution `G³` rivals `n`, and a coarse grid leaves a thick
+  1-cell survivor shell → lower cull rate → bigger survivor hull. So the grid
+  didn't pay off at n ≤ 6 M either.
+
+The cull is left **opt-in** (`filter=True`); it's a real win only for very large
+*solid/volumetric* clouds where the hull time dominates the cull overhead.
 
 ## Remaining levers (not done)
 
-- **Buffer reuse across calls** — a persistent workspace so batch/throughput
-  workloads skip re-allocating the 2n arrays (allocation is now the largest
-  single cost for a small-hull scan). Doesn't help a one-off call.
 - **Active-point compaction in growth** — growth reprocesses all n points every
   round (O(n·rounds)); a compacted active set would cut that. Small payoff here
   (growth is ~12 % of a scan's time).
+- A cull that actually helps surface scans would likely need to cut the survivor
+  hull's fixed costs too (e.g. cull + tight-capacity workspace for the
+  survivors), or target much larger n where hull time ≫ cull overhead.
