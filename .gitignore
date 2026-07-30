@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 docs/paper_text.txt
+
+*.egg-info/
+build/
+dist/

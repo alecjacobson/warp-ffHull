@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ffhull-warp"
+version = "0.1.0"
+description = "GPU-resident 3D convex hull in pure NVIDIA Warp (Flip-Flop / ffHull algorithm)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Alec Jacobson" }]
+keywords = ["convex-hull", "gpu", "warp", "geometry", "cuda"]
+dependencies = [
+    "warp-lang>=1.15",
+    "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+test = ["scipy>=1.7", "pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/alecjacobson/warp-ffHull"
+
+[tool.setuptools]
+packages = ["ffhull"]

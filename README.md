@@ -79,6 +79,23 @@ degenerate inputs verified as valid enclosing hulls).
 | gaussian (tiny hull) | 1M | 43 ms | 146 ms | 3.4× |
 | gaussian | 5M | 0.39 s | 0.85 s | 2.2× |
 
+## Install
+
+Requires a CUDA-capable GPU and `warp-lang>=1.15` (pulled in automatically).
+
+Install the latest from GitHub:
+```bash
+pip install git+https://github.com/alecjacobson/warp-ffHull.git
+```
+
+Or clone and install (add `-e` for an editable/development install, and
+`[test]` to pull in scipy + pytest for the test suite):
+```bash
+git clone https://github.com/alecjacobson/warp-ffHull.git
+cd warp-ffHull
+pip install .            # or: pip install -e '.[test]'
+```
+
 ## Usage
 ```python
 import numpy as np
