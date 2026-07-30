@@ -28,6 +28,7 @@ os.makedirs(OUT, exist_ok=True)
 SURF = (0.60, 0.68, 0.86)
 EDGE = (0.18, 0.22, 0.38)
 PTS = (0.96, 0.72, 0.22)
+TRANSPARENCY = 1.0   # 1.0 = opaque; lower for a translucent glass look
 
 
 def sphere_points(n, seed=0):
@@ -86,10 +87,13 @@ def main():
         pts /= np.linalg.norm(pts, axis=1, keepdims=True)
 
         faces = convex_hull(np.ascontiguousarray(pts), device=DEV)
+        # ffHull winds faces so orient3d(face, s) < 0 (CW seen from outside);
+        # polyscope treats CCW as front, so reverse for correct outward shading.
+        faces = np.ascontiguousarray(faces[:, ::-1])
 
-        m = ps.register_surface_mesh("hull", pts, np.ascontiguousarray(faces),
+        m = ps.register_surface_mesh("hull", pts, faces,
                                      color=SURF, edge_width=0.75, edge_color=EDGE,
-                                     transparency=0.62, back_face_policy="cull",
+                                     transparency=TRANSPARENCY, back_face_policy="cull",
                                      smooth_shade=False)
         m.set_material("clay")
         pc = ps.register_point_cloud("points", pts, radius=0.0115, color=PTS)
