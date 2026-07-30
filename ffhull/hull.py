@@ -79,33 +79,29 @@ def _build_adjacency(tri_v):
     return adj, slot
 
 
-def init_tetra(mesh: Mesh, pts: np.ndarray, tetra_idx: np.ndarray):
-    """Build the 4 oriented faces of the seed tetrahedron on the host."""
-    s = pts[tetra_idx].mean(axis=0)
+def init_tetra(mesh: Mesh, seed_pts: np.ndarray, tetra_idx):
+    """Build the 4 oriented seed-tetra faces and write them to the first 4
+    triangle slots.  ``seed_pts`` are the host coords of the 4 tetra vertices
+    (from the GPU seed search); only 4 entries are written — no full readback."""
+    s = seed_pts.mean(axis=0)
     # Four faces, each the three-vertex subset opposite one apex; orient so the
     # kernel point s is beneath (orient3d(face, s) < 0).
     faces = []
     for skip in range(4):
-        vs = [tetra_idx[k] for k in range(4) if k != skip]
-        a, b, c = pts[vs[0]], pts[vs[1]], pts[vs[2]]
+        ks = [k for k in range(4) if k != skip]
+        a, b, c = seed_pts[ks[0]], seed_pts[ks[1]], seed_pts[ks[2]]
+        vs = [int(tetra_idx[ks[0]]), int(tetra_idx[ks[1]]), int(tetra_idx[ks[2]])]
         if _orient3d_np(a, b, c, s) > 0:
             vs[1], vs[2] = vs[2], vs[1]
-        faces.append([int(vs[0]), int(vs[1]), int(vs[2])])
+        faces.append(vs)
     faces = np.array(faces, dtype=np.int32)
     adj, slot = _build_adjacency([list(f) for f in faces])
 
-    tv = mesh.tri_v.numpy()
-    ta = mesh.tri_adj.numpy()
-    ts = mesh.tri_adj_slot.numpy()
-    tact = mesh.tri_active.numpy()
-    tv[:4] = faces
-    ta[:4] = adj
-    ts[:4] = slot
-    tact[:4] = 1
-    mesh.tri_v.assign(tv)
-    mesh.tri_adj.assign(ta)
-    mesh.tri_adj_slot.assign(ts)
-    mesh.tri_active.assign(tact)
+    dev = mesh.device
+    wp.copy(mesh.tri_v[0:4], wp.array(faces, dtype=wp.vec3i, device=dev))
+    wp.copy(mesh.tri_adj[0:4], wp.array(adj, dtype=wp.vec3i, device=dev))
+    wp.copy(mesh.tri_adj_slot[0:4], wp.array(slot, dtype=wp.vec3i, device=dev))
+    wp.copy(mesh.tri_active[0:4], wp.array([1, 1, 1, 1], dtype=wp.int32, device=dev))
     mesh.set_tri_count(4)
     return wp.vec3d(float(s[0]), float(s[1]), float(s[2]))
 
@@ -185,14 +181,15 @@ def live_faces(mesh: Mesh):
     return tv[act == 1]
 
 
-def build_star(points_np: np.ndarray, device="cuda:0", verbose=False):
+def build_star(points_np: np.ndarray, device="cuda:0", verbose=False, use_graph=True):
     """Convenience: run Phase A only, returning (mesh, s, tetra_idx)."""
+    from . import seed as seedmod
     mesh = Mesh(points_np, device)
-    tetra_idx, ok = choose_tetra(points_np)
-    if not ok:
+    dim, tetra_idx, seed_pts = seedmod.build_seed(mesh.points, mesh.n, device)
+    if dim < 3:
         raise NotImplementedError("degenerate (lower-dimensional) input")
-    s = init_tetra(mesh, points_np, tetra_idx)
-    grow_star(mesh, s, tetra_idx, verbose=verbose)
+    s = init_tetra(mesh, seed_pts, tetra_idx)
+    grow_star(mesh, s, tetra_idx, verbose=verbose, use_graph=use_graph)
     return mesh, s, tetra_idx
 
 
@@ -223,32 +220,28 @@ def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False, use_graph=True):
 
 
 def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
-                return_vertices=False):
+                return_vertices=False, use_graph=True):
     """Compute the 3D convex hull.
 
     Returns an (m,3) int array of face vertex indices into ``points_np``
-    (outward-oriented triangles).  Lower-dimensional inputs (coincident,
-    collinear, coplanar) are detected on the host and dispatched to the
-    appropriate degenerate handler.  With ``return_vertices=True`` also returns
-    the array of extreme-vertex indices.
+    (outward-oriented triangles).  Extreme-point search and affine-dimension
+    classification run on the GPU (``ffhull.seed``); genuinely lower-dimensional
+    inputs (coincident, collinear, coplanar) are dispatched to a host handler.
+    With ``return_vertices=True`` also returns the extreme-vertex indices.
     """
-    from . import degenerate
+    from . import degenerate, seed as seedmod
     points_np = np.ascontiguousarray(points_np, dtype=np.float64)
-    dim, info = degenerate.analyze_dimension(points_np)
-    if dim < 3:
-        faces, verts = degenerate.hull_lowdim(points_np, dim, info)
-        return (faces, verts) if return_vertices else faces
 
     mesh = Mesh(points_np, device)
-    tetra_idx, ok = choose_tetra(points_np)
-    if not ok:
-        # numerically borderline: fall back to the coplanar handler
-        faces, verts = degenerate.hull_lowdim(points_np, 2,
-                                              degenerate.analyze_dimension(points_np, 1e-9)[1])
+    dim, tetra_idx, seed_pts = seedmod.build_seed(mesh.points, mesh.n, device)
+    if dim < 3:
+        d, info = degenerate.analyze_dimension(points_np)
+        faces, verts = degenerate.hull_lowdim(points_np, min(dim, d), info)
         return (faces, verts) if return_vertices else faces
-    s = init_tetra(mesh, points_np, tetra_idx)
-    grow_star(mesh, s, tetra_idx, verbose=verbose)
-    flip_convexify(mesh, s, verbose=verbose)
+
+    s = init_tetra(mesh, seed_pts, tetra_idx)
+    grow_star(mesh, s, tetra_idx, verbose=verbose, use_graph=use_graph)
+    flip_convexify(mesh, s, verbose=verbose, use_graph=use_graph)
     faces = live_faces(mesh)
     if return_vertices:
         return faces, np.unique(faces)
