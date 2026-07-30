@@ -32,19 +32,22 @@ class Mesh:
 
         self.points = wp.array(points_np.astype(np.float64), dtype=wp.vec3d, device=device)
 
-        # Topology (triangle-indexed)
-        self.tri_v = wp.zeros(cap, dtype=wp.vec3i, device=device)
-        self.tri_adj = wp.zeros(cap, dtype=wp.vec3i, device=device)
-        self.tri_adj_slot = wp.zeros(cap, dtype=wp.vec3i, device=device)
-        self.tri_active = wp.zeros(cap, dtype=wp.int32, device=device)
+        # Topology (triangle-indexed).  These large arrays are fully written
+        # before they are read (init_tetra/split for topology; per-round reset
+        # kernels for the growth/flip scratch), so allocate WITHOUT zeroing --
+        # the memset of ~0.3 GB dominated per-call time.
+        self.tri_v = wp.empty(cap, dtype=wp.vec3i, device=device)
+        self.tri_adj = wp.empty(cap, dtype=wp.vec3i, device=device)
+        self.tri_adj_slot = wp.empty(cap, dtype=wp.vec3i, device=device)
+        self.tri_active = wp.empty(cap, dtype=wp.int32, device=device)
 
-        # Point-indexed association
-        self.point_owner = wp.full(self.n, -1, dtype=wp.int32, device=device)
+        # Point-indexed association (written for all n by init_associate)
+        self.point_owner = wp.empty(self.n, dtype=wp.int32, device=device)
 
-        # Growth scratch (triangle-indexed)
-        self.face_score = wp.zeros(cap, dtype=wp.float64, device=device)
-        self.face_pivot = wp.full(cap, INT_MAX, dtype=wp.int32, device=device)
-        self.face_children = wp.full(cap, -1, dtype=wp.vec3i, device=device)
+        # Growth scratch (reset each round by reset_growth before use)
+        self.face_score = wp.empty(cap, dtype=wp.float64, device=device)
+        self.face_pivot = wp.empty(cap, dtype=wp.int32, device=device)
+        self.face_children = wp.empty(cap, dtype=wp.vec3i, device=device)
 
         # Counters / flags (single element device arrays)
         self.tri_count = wp.zeros(1, dtype=wp.int32, device=device)
@@ -55,10 +58,10 @@ class Mesh:
         self.iter_count = wp.zeros(1, dtype=wp.int32, device=device)
         self.convex_flag = wp.zeros(1, dtype=wp.int32, device=device)
 
-        # Flip scratch (triangle-indexed)
-        self.tri_claim = wp.full(cap, INT_MAX, dtype=wp.int32, device=device)
-        self.prop_slot = wp.full(cap, -1, dtype=wp.int32, device=device)
-        self.prop_type = wp.zeros(cap, dtype=wp.int32, device=device)  # 0 none,2 22,3 31
+        # Flip scratch (reset each round by reset_flip before use)
+        self.tri_claim = wp.empty(cap, dtype=wp.int32, device=device)
+        self.prop_slot = wp.empty(cap, dtype=wp.int32, device=device)
+        self.prop_type = wp.empty(cap, dtype=wp.int32, device=device)  # 0 none,2 22,3 31
         # Vertex labels: 0 unknown/extreme, 1 non-extreme
         self.vertex_label = wp.zeros(self.n, dtype=wp.int32, device=device)
 

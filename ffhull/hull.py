@@ -242,7 +242,10 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
     points_np = np.ascontiguousarray(points_np, dtype=np.float64)
 
     # Affine dimension is judged on the true input (a joggle would hide it).
-    dim0, _, _ = seedmod.build_seed(Mesh(points_np, device).points, len(points_np), device)
+    # Upload only the points for this check, not a full (2n-capacity) mesh.
+    _pchk = wp.array(points_np, dtype=wp.vec3d, device=device)
+    dim0, _, _ = seedmod.build_seed(_pchk, len(points_np), device)
+    del _pchk
     if dim0 < 3:
         d, info = degenerate.analyze_dimension(points_np)
         faces, verts = degenerate.hull_lowdim(points_np, min(dim0, d), info)
