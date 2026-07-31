@@ -2,6 +2,7 @@
 
 import numpy as np
 import warp as wp
+from warp.utils import array_scan
 
 from .mesh import Mesh, INT_MAX
 from .predicates import orient3d
@@ -190,7 +191,9 @@ def live_faces(mesh: Mesh):
 def build_star(points_np: np.ndarray, device="cuda:0", verbose=False, use_graph=True):
     """Convenience: run Phase A only, returning (mesh, s, tetra_idx)."""
     from . import seed as seedmod
-    mesh = Mesh(points_np, device)
+    pts = wp.array(np.ascontiguousarray(points_np, dtype=np.float64),
+                   dtype=wp.vec3d, device=device)
+    mesh = Mesh(pts, device)
     dim, seed_idx, seed_pts, scale = seedmod.build_seed_gpu(mesh.points, mesh.n, device)
     if dim < 3:
         raise NotImplementedError("degenerate (lower-dimensional) input")
@@ -240,14 +243,14 @@ _MESH_POOL = {}
 _POOL_MAX_PER_KEY = 2
 
 
-def _acquire_mesh(points_np, device):
-    key = (device, len(points_np))
+def _acquire_mesh(points_wp, n, device):
+    key = (device, n)
     pool = _MESH_POOL.get(key)
     if pool:
         m = pool.pop()
-        m.rebind(points_np)
+        m.rebind(points_wp)
         return m
-    return Mesh(points_np, device)
+    return Mesh(points_wp, device)
 
 
 def _release_mesh(m):
@@ -261,72 +264,173 @@ def clear_pool():
     _MESH_POOL.clear()
 
 
-def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
-                return_vertices=False, use_graph=True, robust=True, filter=False,
-                reuse=True):
-    """Compute the 3D convex hull.
+# ----------------------------------------------------------------------------
+# Warp-native I/O: convert / joggle / compact all on the device so the core hull
+# takes device points and returns device faces with no host staging.
+# ----------------------------------------------------------------------------
 
-    Returns an (m,3) int array of face vertex indices into ``points_np``
-    (outward-oriented triangles).  Extreme-point search and affine-dimension
-    classification run on the GPU (``ffhull.seed``); genuinely lower-dimensional
-    inputs (coincident, collinear, coplanar) are dispatched to a host handler.
-    With ``return_vertices=True`` also returns the extreme-vertex indices.
+@wp.kernel
+def _cast_to_vec3d(src: wp.array(dtype=wp.vec3f), dst: wp.array(dtype=wp.vec3d)):
+    i = wp.tid()
+    p = src[i]
+    dst[i] = wp.vec3d(wp.float64(p[0]), wp.float64(p[1]), wp.float64(p[2]))
 
-    For large clouds a conservative interior-point cull (``ffhull.filter``) runs
-    first, discarding deep-interior points before the exact hull; set
-    ``filter=False`` to disable it.
+
+@wp.kernel
+def _joggle_points(src: wp.array(dtype=wp.vec3d), mag: wp.float64, seed: wp.int32,
+                   dst: wp.array(dtype=wp.vec3d)):
+    # deterministic per-attempt perturbation, generated on the device (no host
+    # RNG / re-upload); magnitude grows with the retry index.
+    i = wp.tid()
+    st = wp.rand_init(seed, i)
+    d = wp.vec3d(wp.float64(wp.randn(st)), wp.float64(wp.randn(st)), wp.float64(wp.randn(st)))
+    dst[i] = src[i] + mag * d
+
+
+@wp.kernel
+def _compact_faces(tri_v: wp.array(dtype=wp.vec3i), tri_active: wp.array(dtype=wp.int32),
+                   count: wp.int32, out_faces: wp.array(dtype=wp.vec3i),
+                   out_count: wp.array(dtype=wp.int32)):
+    t = wp.tid()
+    if t >= count:
+        return
+    if tri_active[t] == 1:
+        j = wp.atomic_add(out_count, 0, 1)
+        out_faces[j] = tri_v[t]
+
+
+@wp.kernel
+def _mark_used(faces: wp.array(dtype=wp.vec3i), mask: wp.array(dtype=wp.int32)):
+    f = faces[wp.tid()]
+    mask[f[0]] = 1
+    mask[f[1]] = 1
+    mask[f[2]] = 1
+
+
+@wp.kernel
+def _compact_verts(mask: wp.array(dtype=wp.int32), scan: wp.array(dtype=wp.int32),
+                   out: wp.array(dtype=wp.int32)):
+    i = wp.tid()
+    if mask[i] == 1:
+        out[scan[i] - 1] = i   # inclusive scan -> 0-based slot
+
+
+def _as_points_wp(points, device):
+    """Normalise the input into a device ``wp.array(dtype=wp.vec3d)``.
+
+    Returns ``(pts_wp, device_str, host_or_None)``.  A ``wp.array`` (vec3d or
+    vec3f) is used in place (float32 cast to float64 on the device); anything
+    else is treated as an ``(n, 3)`` array-like and uploaded -- the numpy shim.
+    """
+    if isinstance(points, wp.array):
+        dev = str(points.device)
+        if points.ndim != 1:
+            raise TypeError("expected a 1-D wp.array of wp.vec3d / wp.vec3f points")
+        if points.dtype == wp.vec3d:
+            return points, dev, None
+        if points.dtype == wp.vec3f:
+            out = wp.empty(int(points.shape[0]), dtype=wp.vec3d, device=points.device)
+            wp.launch(_cast_to_vec3d, dim=int(points.shape[0]), inputs=[points, out],
+                      device=points.device)
+            return out, dev, None
+        raise TypeError(f"unsupported wp.array dtype {points.dtype}; "
+                        "pass wp.vec3d or wp.vec3f")
+    device = device or "cuda:0"
+    arr = np.ascontiguousarray(points, dtype=np.float64)
+    assert arr.ndim == 2 and arr.shape[1] == 3, "expected an (n, 3) array"
+    return wp.array(arr, dtype=wp.vec3d, device=device), device, arr
+
+
+def _compact_faces_wp(mesh: Mesh):
+    """Device array (vec3i) of the live triangles, compacted out of the mesh."""
+    count = mesh.get_tri_count()
+    out = wp.empty(count, dtype=wp.vec3i, device=mesh.device)
+    oc = wp.zeros(1, dtype=wp.int32, device=mesh.device)
+    wp.launch(_compact_faces, dim=count,
+              inputs=[mesh.tri_v, mesh.tri_active, count, out, oc], device=mesh.device)
+    m = int(oc.numpy()[0])
+    return out[:m]
+
+
+def _unique_verts_wp(faces_wp, n, device):
+    """Device array (int32) of the unique vertex indices used by ``faces_wp``,
+    ascending -- a device ``np.unique`` via mask + prefix sum."""
+    m = int(faces_wp.shape[0])
+    mask = wp.zeros(n, dtype=wp.int32, device=device)
+    if m:
+        wp.launch(_mark_used, dim=m, inputs=[faces_wp, mask], device=device)
+    scan = wp.empty(n, dtype=wp.int32, device=device)
+    array_scan(mask, scan, inclusive=True)
+    nv = int(scan[n - 1:n].numpy()[0])
+    out = wp.empty(nv, dtype=wp.int32, device=device)
+    if nv:
+        wp.launch(_compact_verts, dim=n, inputs=[mask, scan, out], device=device)
+    return out
+
+
+def convex_hull_wp(points, device=None, verbose=False, return_vertices=False,
+                   use_graph=True, robust=True, filter=False, reuse=True):
+    """Warp-native 3D convex hull: **device points in, device faces out**.
+
+    ``points`` is a device ``wp.array(dtype=wp.vec3d)`` (or ``wp.vec3f``, cast on
+    the device) of ``n`` points.  Returns a device ``wp.array(dtype=wp.vec3i)`` of
+    outward-oriented triangles indexing into ``points`` (wound so
+    ``orient3d(face, s) < 0``); with ``return_vertices=True`` also a device
+    ``wp.array(dtype=wp.int32)`` of the extreme-vertex indices.
+
+    Nothing but two O(1) scalars (affine dimension + coordinate scale) and the
+    final compacted-count crosses to the host, so this can be driven in a loop
+    over GPU-resident point sets.  Genuinely lower-dimensional inputs (coincident
+    / collinear / coplanar) are dispatched to a host handler and their small
+    result uploaded back.
     """
     from . import degenerate, seed as seedmod
-    points_np = np.ascontiguousarray(points_np, dtype=np.float64)
-    n = len(points_np)
+    pts, device, host = _as_points_wp(points, device)
+    n = int(pts.shape[0])
 
-    # Conservative interior-point cull FIRST, on a lightweight points-only array,
-    # so we never allocate the big 2n workspace for a cloud we're about to shrink.
-    # Discard deep-interior points, run the exact hull on the survivors (a
-    # 2*survivors workspace), and map indices back.  Never drops a true hull
-    # vertex (survivors include every point on/outside the inner hull H0).
+    def host_points():
+        nonlocal host
+        if host is None:
+            host = pts.numpy()
+        return host
+
+    # The interior-point cull is host-index heavy; run it through the numpy shim
+    # and upload the (small) result. Opt-in, for large solid/volumetric clouds.
     if filter and n >= FILTER_THRESHOLD:
-        from . import filter as filt
-        pchk = wp.array(points_np, dtype=wp.vec3d, device=device)
-        dim0, _, _, _ = seedmod.build_seed_gpu(pchk, n, device)
-        if dim0 < 3:
-            del pchk
-            d, info = degenerate.analyze_dimension(points_np)
-            faces, verts = degenerate.hull_lowdim(points_np, min(dim0, d), info)
-            return (faces, verts) if return_vertices else faces
-        keep = filt.cull_indices(
-            pchk, points_np, n, device,
-            hull_fn=lambda c: convex_hull(c, device=device, use_graph=use_graph,
-                                          robust=robust, filter=False))
-        del pchk
-        if keep is not None and len(keep) < 0.6 * n:
-            if verbose:
-                print(f"  cull: {n} -> {len(keep)} survivors ({100*len(keep)/n:.1f}%)")
-            f_local = convex_hull(points_np[keep], device=device, verbose=verbose,
-                                  use_graph=use_graph, robust=robust, filter=False)
-            faces = keep[f_local]
-            return (faces, np.unique(faces)) if return_vertices else faces
+        r = convex_hull(host_points(), device=device, verbose=verbose,
+                        return_vertices=return_vertices, use_graph=use_graph,
+                        robust=robust, filter=True, reuse=reuse)
+        f, v = (r if return_vertices else (r, None))
+        fw = wp.array(np.ascontiguousarray(f, dtype=np.int32), dtype=wp.vec3i, device=device)
+        if return_vertices:
+            return fw, wp.array(np.ascontiguousarray(v, dtype=np.int32),
+                                dtype=wp.int32, device=device)
+        return fw
 
-    mesh = _acquire_mesh(points_np, device) if reuse else Mesh(points_np, device)
+    mesh = _acquire_mesh(pts, n, device) if reuse else Mesh(pts, device)
     # Affine dimension is judged on the true input (a joggle would hide it).
-    # Fully GPU-resident: seed search, tetra construction, and seed membership
-    # all run on the device; only `dim` and `scale` come back (2 scalars).
     dim0, seed_idx, seed_pts, scale = seedmod.build_seed_gpu(mesh.points, n, device)
     if dim0 < 3:
         _release_mesh(mesh)
-        d, info = degenerate.analyze_dimension(points_np)
-        faces, verts = degenerate.hull_lowdim(points_np, min(dim0, d), info)
-        return (faces, verts) if return_vertices else faces
+        hp = host_points()
+        d, info = degenerate.analyze_dimension(hp)
+        faces, verts = degenerate.hull_lowdim(hp, min(dim0, d), info)
+        fw = wp.array(np.ascontiguousarray(faces, dtype=np.int32), dtype=wp.vec3i, device=device)
+        if return_vertices:
+            return fw, wp.array(np.ascontiguousarray(verts, dtype=np.int32),
+                                dtype=wp.int32, device=device)
+        return fw
 
     convex_tol = 1e-6 * scale ** 3
     for attempt in range(5):
         if attempt > 0:
             # deterministic joggle to escape exact/near degeneracies (coplanar
-            # facets etc.); magnitude grows each retry, hull indices unchanged.
+            # facets etc.); generated on the device from the pristine points, so
+            # hull indices are unchanged and no host re-upload happens.
             mag = 1e-8 * scale * (10.0 ** attempt)
-            jog = np.random.default_rng(attempt).standard_normal(points_np.shape)
-            mesh.rebind(points_np + mag * jog)
-            dim, seed_idx, seed_pts, _ = seedmod.build_seed_gpu(mesh.points, mesh.n, device)
+            wp.launch(_joggle_points, dim=n,
+                      inputs=[pts, wp.float64(mag), attempt, mesh.points], device=device)
+            dim, seed_idx, seed_pts, _ = seedmod.build_seed_gpu(mesh.points, n, device)
             if dim < 3:
                 continue  # joggle collapsed dimension (shouldn't happen); retry
         init_tetra_gpu(mesh, seed_idx, seed_pts)
@@ -352,8 +456,65 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
         if verbose:
             print(f"  invalid hull (attempt {attempt}); joggling and retrying")
 
-    faces = live_faces(mesh)   # copies out of the mesh, so it can be released
+    faces_wp = _compact_faces_wp(mesh)   # device array, independent of the mesh
     _release_mesh(mesh)
     if return_vertices:
-        return faces, np.unique(faces)
-    return faces
+        return faces_wp, _unique_verts_wp(faces_wp, n, device)
+    return faces_wp
+
+
+def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
+                return_vertices=False, use_graph=True, robust=True, filter=False,
+                reuse=True):
+    """Convenience numpy shim over :func:`convex_hull_wp`.
+
+    Accepts an ``(n, 3)`` array-like, uploads it, runs the warp-native hull, and
+    reads the faces back as an ``(m, 3)`` int array (outward-oriented triangles
+    indexing into ``points_np``).  With ``return_vertices=True`` also returns the
+    extreme-vertex indices.  For GPU-resident point data, call ``convex_hull_wp``
+    directly and skip both copies.
+
+    For large clouds a conservative interior-point cull (``ffhull.filter``) runs
+    first (``filter=True``), discarding deep-interior points before the exact
+    hull; it is host-index based and off by default.
+    """
+    from . import degenerate, seed as seedmod
+    points_np = np.ascontiguousarray(points_np, dtype=np.float64)
+    n = len(points_np)
+
+    # Conservative interior-point cull FIRST, on a lightweight points-only array,
+    # so we never allocate the big 2n workspace for a cloud we're about to shrink.
+    # Discard deep-interior points, run the exact hull on the survivors, and map
+    # indices back.  Never drops a true hull vertex (survivors include every
+    # point on/outside the inner hull H0).
+    if filter and n >= FILTER_THRESHOLD:
+        from . import filter as filt
+        pchk = wp.array(points_np, dtype=wp.vec3d, device=device)
+        dim0, _, _, _ = seedmod.build_seed_gpu(pchk, n, device)
+        if dim0 < 3:
+            del pchk
+            d, info = degenerate.analyze_dimension(points_np)
+            faces, verts = degenerate.hull_lowdim(points_np, min(dim0, d), info)
+            return (faces, verts) if return_vertices else faces
+        keep = filt.cull_indices(
+            pchk, points_np, n, device,
+            hull_fn=lambda c: convex_hull(c, device=device, use_graph=use_graph,
+                                          robust=robust, filter=False))
+        del pchk
+        if keep is not None and len(keep) < 0.6 * n:
+            if verbose:
+                print(f"  cull: {n} -> {len(keep)} survivors ({100*len(keep)/n:.1f}%)")
+            f_local = convex_hull(points_np[keep], device=device, verbose=verbose,
+                                  use_graph=use_graph, robust=robust, filter=False)
+            faces = keep[f_local]
+            return (faces, np.unique(faces)) if return_vertices else faces
+        # cull not worthwhile -> fall through to the full hull below
+
+    pts = wp.array(points_np, dtype=wp.vec3d, device=device)
+    r = convex_hull_wp(pts, device=device, verbose=verbose,
+                       return_vertices=return_vertices, use_graph=use_graph,
+                       robust=robust, filter=False, reuse=reuse)
+    if return_vertices:
+        faces_wp, verts_wp = r
+        return faces_wp.numpy(), verts_wp.numpy()
+    return r.numpy()

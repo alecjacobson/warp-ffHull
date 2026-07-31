@@ -6,9 +6,11 @@ implementing the **Flip-Flop / ffHull** algorithm of Gao, Cao, Tan & Huang
 [paper](https://www.comp.nus.edu.sg/~tants/flipflop_files/flipflop.pdf)).
 
 Everything but the lower-dimensional fallbacks runs on the GPU as Warp kernels —
-including seed selection and the initial tetrahedron, so a full-dimensional hull
-touches the host only for the final face read-back. The only geometric predicate
-is `orient3d`.
+including seed selection and the initial tetrahedron. The Warp-native entry point
+(`convex_hull_wp`) takes device points and returns device faces, so a
+full-dimensional hull sends only three O(1) scalars to the host (affine dimension,
+coordinate scale, and the final triangle count) — no point or face arrays. The
+only geometric predicate is `orient3d`.
 
 <p align="center">
   <img src="media/sphere_hull.webp" width="480"
@@ -85,7 +87,7 @@ Two fully data-parallel phases:
 - [ ] Simulation of Simplicity wired through the topology kernels (predicate is
   ready; needs consistent use in growth's furthest-point step)
 
-**Correctness:** 33-test suite passes; `stress.py` reports 16/16 valid on an
+**Correctness:** 39-test suite passes; `stress.py` reports 16/16 valid on an
 adversarial battery (general-position exact vs `scipy.spatial.ConvexHull`,
 degenerate inputs verified as valid enclosing hulls).
 
@@ -149,24 +151,51 @@ The `bench_scans.py` / `plot_scans.py` scan benchmarks additionally need
 `huggingface_hub`, `trimesh`, and `matplotlib`.
 
 ## Usage
+
+The core interface is **Warp-native**: `convex_hull_wp` takes a device
+`wp.array` of points and returns a device `wp.array` of triangles, so points that
+already live on the GPU (produced by another kernel, streamed, or hulled every
+frame in a loop) are hulled without any host copy. The only values that cross to
+the host are two O(1) scalars (affine dimension + coordinate scale) and the final
+triangle count.
+
+```python
+import warp as wp
+from ffhull.hull import convex_hull_wp
+
+wp.init()
+pts = wp.array(my_points, dtype=wp.vec3d, device="cuda:0")   # already on the GPU
+                                                             # (wp.vec3f also accepted)
+faces = convex_hull_wp(pts)                       # device wp.array(vec3i), (m,) triangles
+faces, verts = convex_hull_wp(pts, return_vertices=True)     # + device wp.array(int32)
+
+# e.g. re-hull a GPU-resident cloud in a loop with no host round-trip:
+for step in range(n_steps):
+    step_kernel(pts)                              # your kernel mutates pts in place
+    faces = convex_hull_wp(pts)                   # stays on the device
+```
+
+`faces` indexes into `pts`; each triangle is wound so `orient3d(face, s) < 0`.
+Options (shared with the shim below): `robust=True` (validate on-GPU and
+joggle-retry degenerate input), `reuse=True` (reuse a pooled workspace across
+calls; `clear_pool()` frees it), `use_graph=True` (CUDA-graph the loops; `False`
+is an equivalent debug path), `filter=True` (opt-in conservative interior-point
+cull — a win for large **solid/volumetric** clouds, a no-op for surface scans).
+
+### numpy convenience shim
+
+`convex_hull` is a thin wrapper that uploads an `(n, 3)` numpy array, calls
+`convex_hull_wp`, and reads the faces back — handy when your data starts on the
+host:
+
 ```python
 import numpy as np
 from ffhull.hull import convex_hull
 
 pts = np.random.standard_normal((100_000, 3))
-faces = convex_hull(pts, device="cuda:0")               # (m, 3) triangle indices
+faces = convex_hull(pts, device="cuda:0")               # (m, 3) numpy int array
 faces, verts = convex_hull(pts, return_vertices=True)   # + extreme-vertex indices
 ```
-`faces` indexes into `pts`; each triangle is wound so `orient3d(face, s) < 0`
-(inward). Options:
-- `robust=True` (default) — validate on-GPU and joggle-retry degenerate input.
-- `reuse=True` (default) — reuse a pooled workspace across calls; `clear_pool()`
-  frees it.
-- `use_graph=True` (default) — CUDA-graph the loops; `False` is an equivalent
-  debug path.
-- `filter=True` (opt-in) — conservative interior-point cull; a win for large
-  **solid/volumetric** clouds (most points deep interior), a no-op for surface
-  scans (points sit on the hull boundary).
 
 Coincident / collinear / coplanar (lower-dimensional) inputs are detected and
 dispatched to a host handler; duplicates are fine.
@@ -175,17 +204,30 @@ dispatched to a host handler; duplicates are fine.
 
 The Delaunay triangulation of 2D points is the projection of the **lower faces**
 of the 3D convex hull of the points lifted onto the paraboloid `z = x² + y²`.
-`ffhull.delaunay.delaunay_2d` is a thin, pure-Warp wrapper around `convex_hull`
-that does exactly that — lift, hull on the GPU, keep the downward-facing faces:
+`ffhull.delaunay` does exactly that — lift, hull on the GPU, keep the
+downward-facing faces — and mirrors the hull's two-tier interface. The
+warp-native `delaunay_2d_wp` takes a device `wp.array` of 2D points and returns a
+device `wp.array` of triangles (the lift, lower-envelope test, and CCW
+re-winding all run as kernels):
+
+```python
+import warp as wp
+from ffhull.delaunay import delaunay_2d_wp
+
+pts = wp.array(my_points_2d, dtype=wp.vec2d, device="cuda:0")   # already on the GPU
+tris = delaunay_2d_wp(pts)                    # device wp.array(vec3i), CCW into pts
+```
+
+`delaunay_2d` is the numpy shim over it:
 
 ```python
 import numpy as np
 from ffhull.delaunay import delaunay_2d
 
 pts = np.random.default_rng(0).standard_normal((100_000, 2))
-tris = delaunay_2d(pts, device="cuda:0")     # (m, 3) CCW triangle indices into pts
+tris = delaunay_2d(pts, device="cuda:0")     # (m, 3) numpy CCW triangle indices
 
-# also expose the underlying 3D lift for visualisation / debugging:
+# also expose the underlying 3D lift for visualisation / debugging (host path):
 tris, lift, faces, is_lower = delaunay_2d(pts, return_lifted=True)
 ```
 
@@ -201,7 +243,7 @@ triangulation below it, and drop-lines from each lifted vertex to its projection
 
 ## Test & benchmark
 ```
-pytest tests/            # 33 tests (accuracy, robustness, degenerate, delaunay, perf)
+pytest tests/            # 39 tests (accuracy, robustness, degenerate, delaunay, warp-api, perf)
 python3 stress.py        # 16-case robustness battery + GPU-vs-qhull sweep
 python3 bench.py         # synthetic sphere / gaussian sweep
 python3 plot_scans.py    # threedscans figure (media/scans_benchmark.png)

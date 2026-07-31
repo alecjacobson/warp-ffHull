@@ -23,19 +23,23 @@ INT_MAX = np.iinfo(np.int32).max
 
 
 class Mesh:
-    def __init__(self, points_np: np.ndarray, device: str):
-        assert points_np.ndim == 2 and points_np.shape[1] == 3
-        self.n = int(points_np.shape[0])
+    def __init__(self, points_wp: "wp.array", device: str):
+        """``points_wp`` is a device ``wp.array(dtype=wp.vec3d)`` of ``n`` points.
+        Its contents are copied into the internal n+1-slot buffer on the device
+        (slot ``n`` is reserved for the kernel point ``s``), so construction never
+        touches the host."""
+        assert points_wp.ndim == 1, "expected a wp.array(dtype=wp.vec3d) of points"
+        self.n = int(points_wp.shape[0])
         self.device = device
         cap = 2 * self.n + 8  # triangle capacity, >= 2n-4
         self.cap = cap
 
         # Point array has n+1 slots: index n holds the kernel point s, written by
         # init_tetra_gpu, so no kernel needs a host-side s (keeps everything
-        # on-device and graph-capturable).
-        pad = np.empty((self.n + 1, 3), dtype=np.float64)
-        pad[:self.n] = points_np
-        self.points = wp.array(pad, dtype=wp.vec3d, device=device)
+        # on-device and graph-capturable).  Copied on-device from the caller's
+        # array -- no host staging.
+        self.points = wp.empty(self.n + 1, dtype=wp.vec3d, device=device)
+        wp.copy(self.points[0:self.n], points_wp)
         self.s_idx = self.n
 
         # Topology (triangle-indexed).  These large arrays are fully written
@@ -77,15 +81,14 @@ class Mesh:
     def get_tri_count(self) -> int:
         return int(self.tri_count.numpy()[0])
 
-    def rebind(self, points_np: np.ndarray):
-        """Reuse this mesh for a new point set of the SAME size: re-upload the
-        points and reset the state that isn't reinitialised by the kernels
-        (counters + vertex labels).  Avoids re-allocating the 2n arrays."""
-        assert len(points_np) == self.n
+    def rebind(self, points_wp: "wp.array"):
+        """Reuse this mesh for a new point set of the SAME size: re-copy the
+        points (device ``wp.array(dtype=wp.vec3d)``) and reset the state that
+        isn't reinitialised by the kernels (counters + vertex labels).  Avoids
+        re-allocating the 2n arrays."""
+        assert int(points_wp.shape[0]) == self.n
         # write into the first n slots (slot n = s, rewritten by init_tetra_gpu)
-        wp.copy(self.points[0:self.n],
-                wp.array(np.ascontiguousarray(points_np, dtype=np.float64),
-                         dtype=wp.vec3d, device=self.device))
+        wp.copy(self.points[0:self.n], points_wp)
         self.vertex_label.zero_()
         for a in (self.tri_count, self.old_count, self.scratch_i,
                   self.changed, self.cond, self.iter_count, self.convex_flag):
