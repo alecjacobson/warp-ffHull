@@ -223,7 +223,7 @@ def smallest_nonextreme(label: wp.array(dtype=wp.int32),
 @wp.kernel
 def label_kernel(
     points: wp.array(dtype=wp.vec3d),
-    s: wp.vec3d,
+    s_idx: wp.int32,
     tri_v: wp.array(dtype=wp.vec3i),
     tri_adj: wp.array(dtype=wp.vec3i),
     tri_adj_slot: wp.array(dtype=wp.vec3i),
@@ -235,6 +235,7 @@ def label_kernel(
     t = wp.tid()
     if t >= tri_count[0] or tri_active[t] == 0:
         return
+    s = points[s_idx]
     adj = tri_adj[t]
     for i in range(3):
         n = adj[i]
@@ -259,7 +260,7 @@ def label_kernel(
 @wp.kernel
 def propose_claim(
     points: wp.array(dtype=wp.vec3d),
-    s: wp.vec3d,
+    s_idx: wp.int32,
     tri_v: wp.array(dtype=wp.vec3i),
     tri_adj: wp.array(dtype=wp.vec3i),
     tri_adj_slot: wp.array(dtype=wp.vec3i),
@@ -273,6 +274,7 @@ def propose_claim(
     t = wp.tid()
     if t >= tri_count[0] or tri_active[t] == 0:
         return
+    s = points[s_idx]
     adj = tri_adj[t]
     for i in range(3):
         n = adj[i]
@@ -366,7 +368,7 @@ def _wire_new_tri(
 @wp.kernel
 def apply_flips(
     points: wp.array(dtype=wp.vec3d),
-    s: wp.vec3d,
+    s_idx: wp.int32,
     tri_v: wp.array(dtype=wp.vec3i),
     tri_adj: wp.array(dtype=wp.vec3i),
     tri_adj_slot: wp.array(dtype=wp.vec3i),
@@ -380,6 +382,7 @@ def apply_flips(
     t = wp.tid()
     if t >= tri_count[0] or prop_type[t] == 0:
         return
+    s = points[s_idx]
     i1 = prop_slot[t]
     f = gather(tri_v, tri_adj, tri_adj_slot, t, i1)
     if f.kind == KIND_NONE or f.kind != prop_type[t]:

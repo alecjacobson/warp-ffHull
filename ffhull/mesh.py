@@ -30,7 +30,13 @@ class Mesh:
         cap = 2 * self.n + 8  # triangle capacity, >= 2n-4
         self.cap = cap
 
-        self.points = wp.array(points_np.astype(np.float64), dtype=wp.vec3d, device=device)
+        # Point array has n+1 slots: index n holds the kernel point s, written by
+        # init_tetra, so no kernel needs a host-side s (keeps everything on-device
+        # and graph-capturable).
+        pad = np.empty((self.n + 1, 3), dtype=np.float64)
+        pad[:self.n] = points_np
+        self.points = wp.array(pad, dtype=wp.vec3d, device=device)
+        self.s_idx = self.n
 
         # Topology (triangle-indexed).  These large arrays are fully written
         # before they are read (init_tetra/split for topology; per-round reset
@@ -76,7 +82,10 @@ class Mesh:
         points and reset the state that isn't reinitialised by the kernels
         (counters + vertex labels).  Avoids re-allocating the 2n arrays."""
         assert len(points_np) == self.n
-        self.points.assign(np.ascontiguousarray(points_np, dtype=np.float64))
+        # write into the first n slots (slot n = s, rewritten by init_tetra)
+        wp.copy(self.points[0:self.n],
+                wp.array(np.ascontiguousarray(points_np, dtype=np.float64),
+                         dtype=wp.vec3d, device=self.device))
         self.vertex_label.zero_()
         for a in (self.tri_count, self.old_count, self.scratch_i,
                   self.changed, self.cond, self.iter_count, self.convex_flag):

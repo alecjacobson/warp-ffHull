@@ -66,6 +66,10 @@ def init_tetra(mesh: Mesh, seed_pts: np.ndarray, tetra_idx):
     wp.copy(mesh.tri_adj[0:4], wp.array(adj, dtype=wp.vec3i, device=dev))
     wp.copy(mesh.tri_adj_slot[0:4], wp.array(slot, dtype=wp.vec3i, device=dev))
     wp.copy(mesh.tri_active[0:4], wp.array([1, 1, 1, 1], dtype=wp.int32, device=dev))
+    # kernel point s lives at index n of the point array (device-resident, so no
+    # kernel needs a host-side s)
+    wp.copy(mesh.points[mesh.n:mesh.n + 1],
+            wp.array(np.asarray(s, dtype=np.float64).reshape(1, 3), dtype=wp.vec3d, device=dev))
     mesh.set_tri_count(4)
     return wp.vec3d(float(s[0]), float(s[1]), float(s[2]))
 
@@ -108,7 +112,7 @@ def grow_star(mesh: Mesh, s: wp.vec3d, tetra_idx: np.ndarray, verbose=False,
     is_seed_wp = wp.array(is_seed, dtype=wp.int32, device=dev)
 
     wp.launch(grow.init_associate, dim=n,
-              inputs=[mesh.points, mesh.tri_v, s, 4, is_seed_wp, mesh.point_owner],
+              inputs=[mesh.points, mesh.tri_v, mesh.s_idx, 4, is_seed_wp, mesh.point_owner],
               device=dev)
 
     def body():
@@ -129,7 +133,7 @@ def grow_star(mesh: Mesh, s: wp.vec3d, tetra_idx: np.ndarray, verbose=False,
                   inputs=[mesh.tri_adj, mesh.tri_adj_slot, mesh.face_pivot, mesh.face_children,
                           mesh.old_count, mesh.tri_count], device=dev)
         wp.launch(grow.reassociate, dim=n,
-                  inputs=[mesh.points, mesh.tri_v, s, mesh.face_pivot, mesh.face_children,
+                  inputs=[mesh.points, mesh.tri_v, mesh.s_idx, mesh.face_pivot, mesh.face_children,
                           mesh.point_owner, mesh.scratch_i], device=dev)
         wp.launch(grow.advance_cond, dim=1,
                   inputs=[mesh.scratch_i, mesh.iter_count, n + 16, mesh.cond], device=dev)
@@ -173,14 +177,14 @@ def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False, use_graph=True):
         wp.launch(flip.reset_flip, dim=count,
                   inputs=[mesh.tri_claim, mesh.prop_slot, mesh.prop_type, mesh.changed], device=dev)
         wp.launch(flip.label_kernel, dim=count,
-                  inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
+                  inputs=[mesh.points, mesh.s_idx, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
                           mesh.tri_active, tc, mesh.vertex_label, mesh.changed], device=dev)
         wp.launch(flip.propose_claim, dim=count,
-                  inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
+                  inputs=[mesh.points, mesh.s_idx, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
                           mesh.tri_active, tc, mesh.vertex_label,
                           mesh.tri_claim, mesh.prop_slot, mesh.prop_type], device=dev)
         wp.launch(flip.apply_flips, dim=count,
-                  inputs=[mesh.points, s, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
+                  inputs=[mesh.points, mesh.s_idx, mesh.tri_v, mesh.tri_adj, mesh.tri_adj_slot,
                           mesh.tri_active, tc, mesh.tri_claim, mesh.prop_slot,
                           mesh.prop_type, mesh.changed], device=dev)
         # `changed` records progress this round; fold in the safety cap.

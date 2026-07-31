@@ -28,7 +28,7 @@ def _tri_pts(points: wp.array(dtype=wp.vec3d), tri_v: wp.array(dtype=wp.vec3i), 
 def init_associate(
     points: wp.array(dtype=wp.vec3d),
     tri_v: wp.array(dtype=wp.vec3i),
-    s: wp.vec3d,
+    s_idx: wp.int32,
     n_faces: wp.int32,
     is_seed: wp.array(dtype=wp.int32),
     point_owner: wp.array(dtype=wp.int32),
@@ -37,6 +37,7 @@ def init_associate(
     if is_seed[i] == 1:
         point_owner[i] = -1
         return
+    s = points[s_idx]
     p = points[i]
     owner = wp.int32(-1)
     for t in range(n_faces):
@@ -184,7 +185,7 @@ def fix_adjacency(
 def reassociate(
     points: wp.array(dtype=wp.vec3d),
     tri_v: wp.array(dtype=wp.vec3i),
-    s: wp.vec3d,
+    s_idx: wp.int32,
     face_pivot: wp.array(dtype=wp.int32),
     face_children: wp.array(dtype=wp.vec3i),
     point_owner: wp.array(dtype=wp.int32),
@@ -198,6 +199,7 @@ def reassociate(
         # owner not split this round: keep association, still outside
         wp.atomic_add(active_counter, 0, 1)
         return
+    s = points[s_idx]
     if i == face_pivot[t]:
         # this point was just inserted as a vertex this round: retire it
         point_owner[i] = -1
