@@ -91,18 +91,19 @@ degenerate inputs verified as valid enclosing hulls).
 | gaussian | 5M | 42 ms | 0.87 s | **21×** |
 
 **Real-world scans** — [`alecjacobson/threedscans`](https://huggingface.co/datasets/alecjacobson/threedscans)
-(Oliver Laric's high-res museum scans; raw STL vertices, 1.8–6.4 M points each):
-ffHull is **~8–22× faster than qhull per scan** (≈14× overall across the 9
-scans, ~0.56 s vs ~7.9 s; Hermanubis, 6.4 M pts, in ~100 ms). Every hull is
-valid — no extreme vertices missed; on scans with flat sampled facets a few
-extra coplanar-boundary vertices appear (qhull merges those into non-simplicial
-facets; ffHull returns a simplicial hull).
+(Oliver Laric's high-resolution museum scans: **134 models**, 0.1–12 M points
+each, raw mesh vertices). Across all 134, ffHull is **1.0× / 7.7× / 26.2×**
+(min / median / max) faster than qhull — the GPU advantage grows with input size
+(qhull scales ~linearly with points; ffHull's time is dominated by the small
+hull). Every hull is valid — no extreme vertices missed; on scans with flat
+sampled facets a few extra coplanar-boundary vertices appear (qhull merges those
+into non-simplicial facets, ffHull returns a simplicial hull).
 
-<p align="center"><img src="media/scans_benchmark.png" width="900"
-  alt="ffHull vs qhull runtime and speedup on the threedscans dataset"></p>
+<p align="center"><img src="media/scans_benchmark.png" width="760"
+  alt="ffHull (GPU) vs qhull (CPU) hull time vs input size across 134 threedscans models"></p>
 
-Regenerate with `python3 bench_scans.py` (table) or `python3 plot_scans.py`
-(figure) — both need `huggingface_hub` and `trimesh`.
+Regenerate with `python3 plot_scans.py` (resumable; caches to
+`media/scans_results.csv`) — needs `huggingface_hub`, `trimesh`, `matplotlib`.
 
 The float64 predicate path is intentional: on Ada GPUs fp64 is 1/64 rate and an
 fp32-first filter is ~6× faster *per predicate*, but the near-degenerate
