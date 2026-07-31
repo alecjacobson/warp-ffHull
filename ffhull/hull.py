@@ -21,47 +21,6 @@ def _orient3d_np(a, b, c, d):
     return float(np.linalg.det(np.stack([a - d, b - d, c - d])))
 
 
-def choose_tetra(pts: np.ndarray):
-    """Pick 4 affinely-independent, well-separated extreme points.
-
-    Returns (indices[4], ok).  ok is False if the points are (near) coplanar,
-    signalling that a lower-dimensional path is required.
-    """
-    n = len(pts)
-    # Extremes along the 6 axis directions give a good starting spread.
-    ext = set()
-    for ax in range(3):
-        ext.add(int(np.argmin(pts[:, ax])))
-        ext.add(int(np.argmax(pts[:, ax])))
-    ext = list(ext)
-    # p0, p1: farthest-apart pair among extremes.
-    best = (-1.0, ext[0], ext[0])
-    for i in range(len(ext)):
-        for j in range(i + 1, len(ext)):
-            d = np.sum((pts[ext[i]] - pts[ext[j]]) ** 2)
-            if d > best[0]:
-                best = (d, ext[i], ext[j])
-    i0, i1 = best[1], best[2]
-    if best[0] == 0.0:
-        return None, False  # all coincident
-    # p2: farthest from line p0-p1.
-    line = pts[i1] - pts[i0]
-    line = line / np.linalg.norm(line)
-    d2 = np.linalg.norm(np.cross(pts - pts[i0], line), axis=1)
-    i2 = int(np.argmax(d2))
-    if d2[i2] <= 1e-12 * np.sqrt(best[0]):
-        return None, False  # collinear
-    # p3: farthest from plane p0-p1-p2.  orient3d(a,b,c,p) = (p-a).((b-a)x(c-a));
-    # vectorised distance-to-plane over all points.
-    a, b, c = pts[i0], pts[i1], pts[i2]
-    nrm = np.cross(b - a, c - a)
-    vol = np.abs((pts - a) @ nrm)
-    i3 = int(np.argmax(vol))
-    if vol[i3] <= 1e-9 * (best[0] ** 1.5):
-        return None, False  # coplanar
-    return np.array([i0, i1, i2, i3], dtype=np.int64), True
-
-
 def _build_adjacency(tri_v):
     """Build reciprocal adjacency for a small closed triangle mesh (host)."""
     m = len(tri_v)
