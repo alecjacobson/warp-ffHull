@@ -30,13 +30,16 @@ def init_associate(
     tri_v: wp.array(dtype=wp.vec3i),
     s_idx: wp.int32,
     n_faces: wp.int32,
-    is_seed: wp.array(dtype=wp.int32),
+    seed_idx: wp.array(dtype=wp.int32),
+    nseed: wp.int32,
     point_owner: wp.array(dtype=wp.int32),
 ):
     i = wp.tid()
-    if is_seed[i] == 1:
-        point_owner[i] = -1
-        return
+    # the tetra vertices themselves are already on the hull (no cone owner)
+    for k in range(nseed):
+        if i == seed_idx[k]:
+            point_owner[i] = -1
+            return
     s = points[s_idx]
     p = points[i]
     owner = wp.int32(-1)

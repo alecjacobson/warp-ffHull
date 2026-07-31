@@ -5,8 +5,10 @@ implementing the **Flip-Flop / ffHull** algorithm of Gao, Cao, Tan & Huang
 (*"Flip-Flop: Convex Hull Construction via Star-Shaped Polyhedron in 3D"*,
 [paper](https://www.comp.nus.edu.sg/~tants/flipflop_files/flipflop.pdf)).
 
-Everything but the initial tetrahedron and lower-dimensional fallbacks runs on
-the GPU as Warp kernels. The only geometric predicate is `orient3d`.
+Everything but the lower-dimensional fallbacks runs on the GPU as Warp kernels —
+including seed selection and the initial tetrahedron, so a full-dimensional hull
+touches the host only for the final face read-back. The only geometric predicate
+is `orient3d`.
 
 <p align="center">
   <img src="media/sphere_hull.webp" width="480"
@@ -51,8 +53,14 @@ Two fully data-parallel phases:
   `orient3d(face, p) > 0`, and an edge is reflex ⇔ the neighbour apex is outside.
 
 ### GPU-resident & graph-capturable
-- Seed selection (extreme points + affine-dimension test, `ffhull/seed.py`) runs
-  as Warp reductions on the device — no O(n) host passes.
+- Seed selection (extreme points, tetra-vertex choice, affine-dimension test,
+  `ffhull/seed.py`) runs as Warp reductions on the device — no O(n) host passes.
+  Only two O(1) scalars (dimension + coordinate scale) are read back; no point
+  coordinates reach the host on the full-dimensional path.
+- The **initial tetrahedron is built on the GPU** (`init_tetra_gpu`): one kernel
+  orients the 4 seed faces, wires their reciprocal adjacency, and writes the
+  kernel point `s` — no host-side geometry or per-face upload. Seed membership in
+  growth is likewise a device test, so nothing about setup is O(n) on the host.
 - Both phases carry all counts in device arrays and launch over a fixed capacity,
   so each loop body is **captured once as a conditional CUDA graph**
   (`wp.capture_while`) and replayed to convergence with **zero per-round host

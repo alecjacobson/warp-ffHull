@@ -4,6 +4,7 @@ import numpy as np
 import warp as wp
 
 from .mesh import Mesh, INT_MAX
+from .predicates import orient3d
 from . import grow
 from . import flip
 
@@ -24,57 +25,88 @@ def _orient3d_np(a, b, c, d):
     return float(np.linalg.det(np.stack([a - d, b - d, c - d])))
 
 
-def _build_adjacency(tri_v):
-    """Build reciprocal adjacency for a small closed triangle mesh (host)."""
-    m = len(tri_v)
-    adj = np.full((m, 3), -1, dtype=np.int32)
-    slot = np.full((m, 3), -1, dtype=np.int32)
-    edge_map = {}
-    for t in range(m):
-        v = tri_v[t]
-        for i in range(3):
-            e = (v[(i + 1) % 3], v[(i + 2) % 3])
-            key = frozenset(e)
-            if key in edge_map:
-                ot, oi = edge_map[key]
-                adj[t][i] = ot
-                slot[t][i] = oi
-                adj[ot][oi] = t
-                slot[ot][oi] = i
-            else:
-                edge_map[key] = (t, i)
-    return adj, slot
+# ----------------------------------------------------------------------------
+# GPU-resident tetra: build the 4 oriented seed faces + reciprocal adjacency +
+# kernel point s directly on the device from the device seed arrays.  A single
+# thread does the fixed O(1) work, so nothing about the initial tetrahedron
+# touches the host.
+# ----------------------------------------------------------------------------
+
+@wp.func
+def _has(tv: wp.vec3i, x: wp.int32):
+    return tv[0] == x or tv[1] == x or tv[2] == x
 
 
-def init_tetra(mesh: Mesh, seed_pts: np.ndarray, tetra_idx):
-    """Build the 4 oriented seed-tetra faces and write them to the first 4
-    triangle slots.  ``seed_pts`` are the host coords of the 4 tetra vertices
-    (from the GPU seed search); only 4 entries are written — no full readback."""
-    s = seed_pts.mean(axis=0)
-    # Four faces, each the three-vertex subset opposite one apex; orient so the
-    # kernel point s is beneath (orient3d(face, s) < 0).
-    faces = []
-    for skip in range(4):
-        ks = [k for k in range(4) if k != skip]
-        a, b, c = seed_pts[ks[0]], seed_pts[ks[1]], seed_pts[ks[2]]
-        vs = [int(tetra_idx[ks[0]]), int(tetra_idx[ks[1]]), int(tetra_idx[ks[2]])]
-        if _orient3d_np(a, b, c, s) > 0:
-            vs[1], vs[2] = vs[2], vs[1]
-        faces.append(vs)
-    faces = np.array(faces, dtype=np.int32)
-    adj, slot = _build_adjacency([list(f) for f in faces])
+@wp.func
+def _slot_not(tv: wp.vec3i, x: wp.int32, y: wp.int32):
+    # local slot of tv's vertex that is neither x nor y == the reciprocal slot
+    # of the shared edge {x, y} (the edge at slot e omits vertex e).
+    for e in range(3):
+        if tv[e] != x and tv[e] != y:
+            return e
+    return wp.int32(-1)
 
-    dev = mesh.device
-    wp.copy(mesh.tri_v[0:4], wp.array(faces, dtype=wp.vec3i, device=dev))
-    wp.copy(mesh.tri_adj[0:4], wp.array(adj, dtype=wp.vec3i, device=dev))
-    wp.copy(mesh.tri_adj_slot[0:4], wp.array(slot, dtype=wp.vec3i, device=dev))
-    wp.copy(mesh.tri_active[0:4], wp.array([1, 1, 1, 1], dtype=wp.int32, device=dev))
-    # kernel point s lives at index n of the point array (device-resident, so no
-    # kernel needs a host-side s)
-    wp.copy(mesh.points[mesh.n:mesh.n + 1],
-            wp.array(np.asarray(s, dtype=np.float64).reshape(1, 3), dtype=wp.vec3d, device=dev))
-    mesh.set_tri_count(4)
-    return wp.vec3d(float(s[0]), float(s[1]), float(s[2]))
+
+@wp.func
+def _match(tri_v: wp.array(dtype=wp.vec3i), k: wp.int32, x: wp.int32, y: wp.int32):
+    # the other tetra face (besides k) sharing edge {x, y}, and its slot
+    for m in range(4):
+        if m != k:
+            tvm = tri_v[m]
+            if _has(tvm, x) and _has(tvm, y):
+                return wp.vec2i(m, _slot_not(tvm, x, y))
+    return wp.vec2i(-1, -1)
+
+
+@wp.func
+def _oriented_face(a: wp.vec3d, b: wp.vec3d, c: wp.vec3d, s: wp.vec3d,
+                   ia: wp.int32, ib: wp.int32, ic: wp.int32):
+    # wind so the kernel point s is beneath the face: orient3d(face, s) < 0
+    if orient3d(a, b, c, s) > wp.float64(0.0):
+        return wp.vec3i(ia, ic, ib)
+    return wp.vec3i(ia, ib, ic)
+
+
+@wp.kernel
+def build_tetra(seed_pts: wp.array(dtype=wp.vec3d), seed_idx: wp.array(dtype=wp.int32),
+                n: wp.int32, points: wp.array(dtype=wp.vec3d),
+                tri_v: wp.array(dtype=wp.vec3i), tri_adj: wp.array(dtype=wp.vec3i),
+                tri_adj_slot: wp.array(dtype=wp.vec3i), tri_active: wp.array(dtype=wp.int32),
+                tri_count: wp.array(dtype=wp.int32)):
+    # kernel point s = centroid, stored at point slot n
+    s = (seed_pts[0] + seed_pts[1] + seed_pts[2] + seed_pts[3]) * wp.float64(0.25)
+    points[n] = s
+
+    p0 = seed_pts[0]; p1 = seed_pts[1]; p2 = seed_pts[2]; p3 = seed_pts[3]
+    i0 = seed_idx[0]; i1 = seed_idx[1]; i2 = seed_idx[2]; i3 = seed_idx[3]
+
+    # four faces, each opposite one apex, oriented so s is beneath
+    tri_v[0] = _oriented_face(p1, p2, p3, s, i1, i2, i3)
+    tri_v[1] = _oriented_face(p0, p2, p3, s, i0, i2, i3)
+    tri_v[2] = _oriented_face(p0, p1, p3, s, i0, i1, i3)
+    tri_v[3] = _oriented_face(p0, p1, p2, s, i0, i1, i2)
+    for k in range(4):
+        tri_active[k] = 1
+
+    # reciprocal adjacency by edge matching (edge at slot e = verts (e+1, e+2))
+    for k in range(4):
+        tv = tri_v[k]
+        m0 = _match(tri_v, k, tv[1], tv[2])
+        m1 = _match(tri_v, k, tv[2], tv[0])
+        m2 = _match(tri_v, k, tv[0], tv[1])
+        tri_adj[k] = wp.vec3i(m0[0], m1[0], m2[0])
+        tri_adj_slot[k] = wp.vec3i(m0[1], m1[1], m2[1])
+
+    tri_count[0] = 4
+
+
+def init_tetra_gpu(mesh: Mesh, seed_idx, seed_pts):
+    """Build the seed tetrahedron entirely on the GPU from the device seed
+    arrays (from ``seed.build_seed_gpu``).  No host readback."""
+    wp.launch(build_tetra, dim=1,
+              inputs=[seed_pts, seed_idx, mesh.n, mesh.points, mesh.tri_v,
+                      mesh.tri_adj, mesh.tri_adj_slot, mesh.tri_active, mesh.tri_count],
+              device=mesh.device)
 
 
 # ----------------------------------------------------------------------------
@@ -104,18 +136,17 @@ def _run_while(mesh: Mesh, cond, body, use_graph: bool, safety: int):
 # Phase A driver
 # ----------------------------------------------------------------------------
 
-def grow_star(mesh: Mesh, s: wp.vec3d, tetra_idx: np.ndarray, verbose=False,
-              use_graph=True):
+def grow_star(mesh: Mesh, seed_idx, nseed=4, verbose=False, use_graph=True):
+    """Phase A growth.  ``seed_idx`` is a device int32 array of the tetra vertex
+    indices (from ``seed.build_seed_gpu`` or wrapped from a host list); seed
+    membership is tested on the GPU, so there is no O(n) host pass."""
     dev = mesh.device
     n = mesh.n
     cap = mesh.cap
 
-    is_seed = np.zeros(n, dtype=np.int32)
-    is_seed[tetra_idx] = 1
-    is_seed_wp = wp.array(is_seed, dtype=wp.int32, device=dev)
-
     wp.launch(grow.init_associate, dim=n,
-              inputs=[mesh.points, mesh.tri_v, mesh.s_idx, 4, is_seed_wp, mesh.point_owner],
+              inputs=[mesh.points, mesh.tri_v, mesh.s_idx, 4, seed_idx, nseed,
+                      mesh.point_owner],
               device=dev)
 
     def body():
@@ -160,15 +191,17 @@ def build_star(points_np: np.ndarray, device="cuda:0", verbose=False, use_graph=
     """Convenience: run Phase A only, returning (mesh, s, tetra_idx)."""
     from . import seed as seedmod
     mesh = Mesh(points_np, device)
-    dim, tetra_idx, seed_pts = seedmod.build_seed(mesh.points, mesh.n, device)
+    dim, seed_idx, seed_pts, scale = seedmod.build_seed_gpu(mesh.points, mesh.n, device)
     if dim < 3:
         raise NotImplementedError("degenerate (lower-dimensional) input")
-    s = init_tetra(mesh, seed_pts, tetra_idx)
-    grow_star(mesh, s, tetra_idx, verbose=verbose, use_graph=use_graph)
+    init_tetra_gpu(mesh, seed_idx, seed_pts)
+    grow_star(mesh, seed_idx, 4, verbose=verbose, use_graph=use_graph)
+    tetra_idx = seed_idx.numpy()
+    s = wp.vec3d(*[float(x) for x in seed_pts.numpy().mean(axis=0)])
     return mesh, s, tetra_idx
 
 
-def flip_convexify(mesh: Mesh, s: wp.vec3d, verbose=False, use_graph=True):
+def flip_convexify(mesh: Mesh, verbose=False, use_graph=True):
     dev = mesh.device
     tc = mesh.tri_count  # device count (unchanged by flips)
     # Flips never grow the triangle count, so launch over the post-growth count
@@ -255,7 +288,7 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
     if filter and n >= FILTER_THRESHOLD:
         from . import filter as filt
         pchk = wp.array(points_np, dtype=wp.vec3d, device=device)
-        dim0, _, _ = seedmod.build_seed(pchk, n, device)
+        dim0, _, _, _ = seedmod.build_seed_gpu(pchk, n, device)
         if dim0 < 3:
             del pchk
             d, info = degenerate.analyze_dimension(points_np)
@@ -276,32 +309,29 @@ def convex_hull(points_np: np.ndarray, device="cuda:0", verbose=False,
 
     mesh = _acquire_mesh(points_np, device) if reuse else Mesh(points_np, device)
     # Affine dimension is judged on the true input (a joggle would hide it).
-    dim0, ti0, sp0 = seedmod.build_seed(mesh.points, n, device)
+    # Fully GPU-resident: seed search, tetra construction, and seed membership
+    # all run on the device; only `dim` and `scale` come back (2 scalars).
+    dim0, seed_idx, seed_pts, scale = seedmod.build_seed_gpu(mesh.points, n, device)
     if dim0 < 3:
         _release_mesh(mesh)
         d, info = degenerate.analyze_dimension(points_np)
         faces, verts = degenerate.hull_lowdim(points_np, min(dim0, d), info)
         return (faces, verts) if return_vertices else faces
 
-    # coordinate scale for the tolerance, from the seed extremes (avoids an
-    # O(n) host pass over all points).
-    scale = float(np.abs(sp0).max() + 1.0)
     convex_tol = 1e-6 * scale ** 3
     for attempt in range(5):
-        if attempt == 0:
-            dim, tetra_idx, seed_pts = dim0, ti0, sp0
-        else:
+        if attempt > 0:
             # deterministic joggle to escape exact/near degeneracies (coplanar
             # facets etc.); magnitude grows each retry, hull indices unchanged.
             mag = 1e-8 * scale * (10.0 ** attempt)
             jog = np.random.default_rng(attempt).standard_normal(points_np.shape)
             mesh.rebind(points_np + mag * jog)
-            dim, tetra_idx, seed_pts = seedmod.build_seed(mesh.points, mesh.n, device)
+            dim, seed_idx, seed_pts, _ = seedmod.build_seed_gpu(mesh.points, mesh.n, device)
             if dim < 3:
                 continue  # joggle collapsed dimension (shouldn't happen); retry
-        s = init_tetra(mesh, seed_pts, tetra_idx)
-        grow_star(mesh, s, tetra_idx, verbose=verbose, use_graph=use_graph)
-        flip_convexify(mesh, s, verbose=verbose, use_graph=use_graph)
+        init_tetra_gpu(mesh, seed_idx, seed_pts)
+        grow_star(mesh, seed_idx, 4, verbose=verbose, use_graph=use_graph)
+        flip_convexify(mesh, verbose=verbose, use_graph=use_graph)
         if not robust:
             break
         mesh.convex_flag.zero_()

@@ -31,15 +31,15 @@ class Mesh:
         self.cap = cap
 
         # Point array has n+1 slots: index n holds the kernel point s, written by
-        # init_tetra, so no kernel needs a host-side s (keeps everything on-device
-        # and graph-capturable).
+        # init_tetra_gpu, so no kernel needs a host-side s (keeps everything
+        # on-device and graph-capturable).
         pad = np.empty((self.n + 1, 3), dtype=np.float64)
         pad[:self.n] = points_np
         self.points = wp.array(pad, dtype=wp.vec3d, device=device)
         self.s_idx = self.n
 
         # Topology (triangle-indexed).  These large arrays are fully written
-        # before they are read (init_tetra/split for topology; per-round reset
+        # before they are read (init_tetra_gpu/split for topology; per-round reset
         # kernels for the growth/flip scratch), so allocate WITHOUT zeroing --
         # the memset of ~0.3 GB dominated per-call time.
         self.tri_v = wp.empty(cap, dtype=wp.vec3i, device=device)
@@ -82,7 +82,7 @@ class Mesh:
         points and reset the state that isn't reinitialised by the kernels
         (counters + vertex labels).  Avoids re-allocating the 2n arrays."""
         assert len(points_np) == self.n
-        # write into the first n slots (slot n = s, rewritten by init_tetra)
+        # write into the first n slots (slot n = s, rewritten by init_tetra_gpu)
         wp.copy(self.points[0:self.n],
                 wp.array(np.ascontiguousarray(points_np, dtype=np.float64),
                          dtype=wp.vec3d, device=self.device))

@@ -35,6 +35,15 @@ Almost all the wall-clock was host↔device overhead, not hull compute:
 7. **Kill O(n) host passes** — the tolerance scale used `np.abs(points_np).max()`
    over every point (~15 ms at 6.4 M); take it from the seed extremes instead.
    Also folded the per-round `changed` reset into `reset_flip`.
+8. **Full GPU-resident seed + tetra** — the seed search (`build_seed_gpu`) now
+   picks all 4 tetra vertices on the device and reads back only two scalars
+   (dimension + scale); the initial tetrahedron is assembled by a single kernel
+   (`init_tetra_gpu`: orient 4 faces, wire reciprocal adjacency, write `s`)
+   instead of host orient3d + an adjacency dict + four small uploads; and seed
+   membership in growth is a device test, removing the last O(n) host array (the
+   per-attempt `is_seed = np.zeros(n)` + upload). No point coordinates reach the
+   host on the full-dim path, so `convex_hull` can be driven in a loop with only
+   O(1) host syncs. Sphere 1 M: ~0.81 → ~0.72 s.
 
 Net on the 9 scans: **2.71 s → 0.58 s (4.7× faster), 2.8× → 13.9× vs qhull.**
 Hermanubis (6.4 M pts) 592 → 96 ms (16× qhull).
