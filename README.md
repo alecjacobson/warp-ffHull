@@ -163,10 +163,40 @@ faces, verts = convex_hull(pts, return_vertices=True)   # + extreme-vertex indic
 Coincident / collinear / coplanar (lower-dimensional) inputs are detected and
 dispatched to a host handler; duplicates are fine.
 
+## 2D Delaunay triangulation (via lifting)
+
+The Delaunay triangulation of 2D points is the projection of the **lower faces**
+of the 3D convex hull of the points lifted onto the paraboloid `z = x² + y²`.
+`ffhull.delaunay.delaunay_2d` is a thin, pure-Warp wrapper around `convex_hull`
+that does exactly that — lift, hull on the GPU, keep the downward-facing faces:
+
+```python
+import numpy as np
+from ffhull.delaunay import delaunay_2d
+
+pts = np.random.default_rng(0).standard_normal((100_000, 2))
+tris = delaunay_2d(pts, device="cuda:0")     # (m, 3) CCW triangle indices into pts
+
+# also expose the underlying 3D lift for visualisation / debugging:
+tris, lift, faces, is_lower = delaunay_2d(pts, return_lifted=True)
+```
+
+It matches `scipy.spatial.Delaunay` in general position and satisfies the
+empty-circumcircle property (see `tests/test_delaunay.py`). The figure below
+(from `python3 scripts/make_delaunay_demo.py`) shows the whole construction: the
+lifted paraboloid hull with its **lower envelope in gold** (the Delaunay faces)
+and the remaining upper faces translucent slate, the extracted flat 2D Delaunay
+triangulation below it, and drop-lines from each lifted vertex to its projection.
+
+<p align="center"><img src="media/delaunay_lift.png" width="560"
+  alt="A point set lifted to the paraboloid; the lower faces of its 3D convex hull project down to the 2D Delaunay triangulation"></p>
+
 ## Test & benchmark
 ```
 pytest tests/            # 33 tests (accuracy, robustness, degenerate, delaunay, perf)
 python3 stress.py        # 16-case robustness battery + GPU-vs-qhull sweep
 python3 bench.py         # synthetic sphere / gaussian sweep
 python3 plot_scans.py    # threedscans figure (media/scans_benchmark.png)
+
+python3 scripts/make_delaunay_demo.py   # Delaunay lifting figure (needs polyscope)
 ```
