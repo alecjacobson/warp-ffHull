@@ -77,7 +77,7 @@ Two fully data-parallel phases:
 - [ ] Simulation of Simplicity wired through the topology kernels (predicate is
   ready; needs consistent use in growth's furthest-point step)
 
-**Correctness:** 29-test suite passes; `stress.py` reports 16/16 valid on an
+**Correctness:** 31-test suite passes; `stress.py` reports 16/16 valid on an
 adversarial battery (general-position exact vs `scipy.spatial.ConvexHull`,
 degenerate inputs verified as valid enclosing hulls).
 
@@ -85,44 +85,55 @@ degenerate inputs verified as valid enclosing hulls).
 
 | input | n | ffHull | qhull | speedup |
 |-------|---|--------|-------|---------|
-| sphere (all extreme) | 1M | 0.80 s | 6.0 s | **7.5×** |
-| sphere | 5M | 5.1 s | 36 s | **7.1×** |
-| gaussian (tiny hull) | 1M | 37 ms | 148 ms | 4.0× |
-| gaussian | 5M | 0.39 s | 0.85 s | 2.2× |
+| sphere (all extreme) | 1M | 0.81 s | 6.0 s | **7.4×** |
+| sphere | 5M | 4.7 s | 35 s | **7.5×** |
+| gaussian (tiny hull) | 1M | 21 ms | 151 ms | 7.3× |
+| gaussian | 5M | 42 ms | 0.87 s | **21×** |
 
 **Real-world scans** — [`alecjacobson/threedscans`](https://huggingface.co/datasets/alecjacobson/threedscans)
 (Oliver Laric's high-res museum scans; raw STL vertices, 1.8–6.4 M points each):
-ffHull is **8–16× faster than qhull per scan** (13.9× overall across the 9
-scans, 0.58 s vs 8.0 s; Hermanubis 6.4 M pts in 96 ms). Every hull is valid — no
-extreme vertices missed; on
-scans with flat sampled facets a few extra coplanar-boundary vertices appear
-(qhull merges those into non-simplicial facets; ffHull returns a simplicial
-hull). Run `python3 bench_scans.py` (needs `huggingface_hub`, `trimesh`).
+ffHull is **~8–22× faster than qhull per scan** (≈14× overall across the 9
+scans, ~0.56 s vs ~7.9 s; Hermanubis, 6.4 M pts, in ~100 ms). Every hull is
+valid — no extreme vertices missed; on scans with flat sampled facets a few
+extra coplanar-boundary vertices appear (qhull merges those into non-simplicial
+facets; ffHull returns a simplicial hull).
+
+<p align="center"><img src="media/scans_benchmark.png" width="900"
+  alt="ffHull vs qhull runtime and speedup on the threedscans dataset"></p>
+
+Regenerate with `python3 bench_scans.py` (table) or `python3 plot_scans.py`
+(figure) — both need `huggingface_hub` and `trimesh`.
 
 The float64 predicate path is intentional: on Ada GPUs fp64 is 1/64 rate and an
 fp32-first filter is ~6× faster *per predicate*, but the near-degenerate
 predicates that pervade coplanar facets and dense hulls make it oscillate and
-fall back, a net loss here — see `docs/` notes. The realized wins came from
-avoiding host↔device overhead: GPU-resident seed, no per-round syncs (CUDA
-graphs), `wp.empty` allocation, launching flips over the live triangle count,
-and reusing the workspace across calls. See `docs/optimization_notes.md`.
+fall back, a net loss here — see `docs/optimization_notes.md`. The realized wins
+came from avoiding host↔device overhead: GPU-resident seed, no per-round syncs
+(CUDA graphs), `wp.empty` allocation, launching flips over the live triangle
+count, reusing the workspace across calls, and copying back only the live
+triangles (not the full `2n` array).
 
 ## Install
 
-Requires a CUDA-capable GPU and `warp-lang>=1.15` (pulled in automatically).
+Requires a CUDA-capable GPU (CUDA 12.4+ for the conditional-graph path) and
+Python ≥ 3.8. The only runtime dependencies are `warp-lang>=1.15` and `numpy`,
+pulled in automatically.
 
 Install the latest from GitHub:
 ```bash
 pip install git+https://github.com/alecjacobson/warp-ffHull.git
 ```
 
-Or clone and install (add `-e` for an editable/development install, and
-`[test]` to pull in scipy + pytest for the test suite):
+Or clone and install (add `-e` for an editable/development install):
 ```bash
 git clone https://github.com/alecjacobson/warp-ffHull.git
 cd warp-ffHull
-pip install .            # or: pip install -e '.[test]'
+pip install .                 # runtime only
+pip install -e '.[test]'      # + scipy, pytest        (test suite / stress.py)
+pip install -e '.[viz]'       # + polyscope, imageio   (scripts/make_anim.py)
 ```
+The `bench_scans.py` / `plot_scans.py` scan benchmarks additionally need
+`huggingface_hub`, `trimesh`, and `matplotlib`.
 
 ## Usage
 ```python
@@ -130,17 +141,27 @@ import numpy as np
 from ffhull.hull import convex_hull
 
 pts = np.random.standard_normal((100_000, 3))
-faces = convex_hull(pts, device="cuda:0")          # (m, 3) outward triangles
-faces, verts = convex_hull(pts, return_vertices=True)
-# convex_hull(pts, use_graph=False, robust=False) to disable graph capture / retry
-# convex_hull(pts, filter=True)  # opt-in conservative interior-point cull;
-#   discards points inside a coarse inner hull first. A win for large SOLID /
-#   volumetric clouds (most points are deep interior); a no-op for surface scans.
+faces = convex_hull(pts, device="cuda:0")               # (m, 3) triangle indices
+faces, verts = convex_hull(pts, return_vertices=True)   # + extreme-vertex indices
 ```
+`faces` indexes into `pts`; each triangle is wound so `orient3d(face, s) < 0`
+(inward). Options:
+- `robust=True` (default) — validate on-GPU and joggle-retry degenerate input.
+- `reuse=True` (default) — reuse a pooled workspace across calls; `clear_pool()`
+  frees it.
+- `use_graph=True` (default) — CUDA-graph the loops; `False` is an equivalent
+  debug path.
+- `filter=True` (opt-in) — conservative interior-point cull; a win for large
+  **solid/volumetric** clouds (most points deep interior), a no-op for surface
+  scans (points sit on the hull boundary).
+
+Coincident / collinear / coplanar (lower-dimensional) inputs are detected and
+dispatched to a host handler; duplicates are fine.
 
 ## Test & benchmark
 ```
-pytest tests/            # 27 tests
-python3 stress.py        # robustness battery + perf sweep
-python3 bench.py
+pytest tests/            # 31 tests (accuracy, robustness, degenerate, perf)
+python3 stress.py        # 16-case robustness battery + GPU-vs-qhull sweep
+python3 bench.py         # synthetic sphere / gaussian sweep
+python3 plot_scans.py    # threedscans figure (media/scans_benchmark.png)
 ```
