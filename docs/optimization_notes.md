@@ -39,6 +39,25 @@ Almost all the wall-clock was host↔device overhead, not hull compute:
 Net on the 9 scans: **2.71 s → 0.58 s (4.7× faster), 2.8× → 13.9× vs qhull.**
 Hermanubis (6.4 M pts) 592 → 96 ms (16× qhull).
 
+## Flip iteration cap: 20000 → 5000
+
+The Flip-Flop device loop has a safety cap (`FLIP_MAXIT`) that forces the
+`capture_while` to exit and lets the robust wrapper joggle+retry a stuck input.
+It was set at 20000 "to be safe", but a *converging* hull needs very few rounds:
+across all 134 threedscans models the worst is ~1700 (Thorne, a 58 k-vertex
+hull); Sphinx_3 (28 k-vertex, 9.9 M pts) needs 515.  So a cap of 5000 keeps a
+3× margin over any legitimately-converging hull while making a *degenerate*
+input (which oscillates and will never converge in fp64) bail ~4× sooner.
+
+This was the fix for the one sub-1.0× model: **sheep_version_06** (12 M pts) has
+a large flat base at z = 0 (a ~2 M-point coplanar facet) that makes the fp64
+predicate oscillate.  The doomed first attempt used to burn all 20000 rounds
+(~1.9 s) before joggling; at 5000 it bails at ~0.5 s, so the whole hull dropped
+from 3.0 s (0.99×, *slower* than qhull) to 1.5 s (**2.0×**).  The joggled retry
+converges normally and the result is valid (all points enclosed; the flat-base
+boundary is triangulated slightly differently from qhull's merged facet).  No
+converging model changed — the cap only ever fires on genuine degeneracy.
+
 ## What didn't work: fp32-first predicate filter
 
 An fp32 certified filter (Shewchuk bound) with fp64 fallback is ~6× faster per

@@ -7,10 +7,13 @@ from .mesh import Mesh, INT_MAX
 from . import grow
 from . import flip
 
-# Safety cap on Flip-Flop rounds inside the device loop.  Convergence is fast
-# for well-conditioned inputs; hitting this cap signals a degenerate case, which
-# the robust wrapper resolves by joggling and retrying.
-FLIP_MAXIT = 20000
+# Safety cap on Flip-Flop rounds inside the device loop.  A converging hull
+# needs few rounds (the worst across the 134 threedscans models is ~1700, for a
+# 58k-vertex hull); hitting this cap means the float64 predicate is oscillating
+# on a degenerate case (e.g. a large coplanar facet), which the robust wrapper
+# then resolves by joggling and retrying.  Kept a few x above the worst legit
+# count so the doomed attempt bails quickly instead of burning 20k rounds.
+FLIP_MAXIT = 5000
 
 
 # ----------------------------------------------------------------------------

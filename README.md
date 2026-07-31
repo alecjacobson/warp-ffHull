@@ -77,7 +77,7 @@ Two fully data-parallel phases:
 - [ ] Simulation of Simplicity wired through the topology kernels (predicate is
   ready; needs consistent use in growth's furthest-point step)
 
-**Correctness:** 31-test suite passes; `stress.py` reports 16/16 valid on an
+**Correctness:** 33-test suite passes; `stress.py` reports 16/16 valid on an
 adversarial battery (general-position exact vs `scipy.spatial.ConvexHull`,
 degenerate inputs verified as valid enclosing hulls).
 
@@ -93,11 +93,15 @@ degenerate inputs verified as valid enclosing hulls).
 **Real-world scans** — [`alecjacobson/threedscans`](https://huggingface.co/datasets/alecjacobson/threedscans)
 (Oliver Laric's high-resolution museum scans: **134 models**, 0.1–12 M points
 each, raw mesh vertices). Across all 134, ffHull is **1.0× / 7.7× / 26.2×**
-(min / median / max) faster than qhull — the GPU advantage grows with input size
-(qhull scales ~linearly with points; ffHull's time is dominated by the small
-hull). Every hull is valid — no extreme vertices missed; on scans with flat
-sampled facets a few extra coplanar-boundary vertices appear (qhull merges those
-into non-simplicial facets, ffHull returns a simplicial hull).
+(min / median / max) faster than qhull, and never slower — the GPU advantage
+grows with input size (qhull scales ~linearly with points; ffHull's time is
+dominated by the small hull). The **1.0×** floor is just the smallest clouds
+(~0.1 M points, e.g. *Actaeon* at 1.03×), where ffHull's ~25 ms of fixed GPU
+overhead (upload + kernel launches + graph capture) roughly equals qhull's
+already-tiny time; for **n ≥ 1 M the median speedup is ~10×**, topping out at
+26× on the ~10 M-point models. Every hull is valid — no extreme vertices missed;
+on scans with flat sampled facets a few extra coplanar-boundary vertices appear
+(qhull merges those into non-simplicial facets, ffHull returns a simplicial hull).
 
 <p align="center"><img src="media/scans_benchmark.png" width="760"
   alt="ffHull (GPU) vs qhull (CPU) hull time vs input size across 134 threedscans models"></p>
@@ -161,7 +165,7 @@ dispatched to a host handler; duplicates are fine.
 
 ## Test & benchmark
 ```
-pytest tests/            # 31 tests (accuracy, robustness, degenerate, perf)
+pytest tests/            # 33 tests (accuracy, robustness, degenerate, delaunay, perf)
 python3 stress.py        # 16-case robustness battery + GPU-vs-qhull sweep
 python3 bench.py         # synthetic sphere / gaussian sweep
 python3 plot_scans.py    # threedscans figure (media/scans_benchmark.png)
